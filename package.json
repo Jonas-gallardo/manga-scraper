@@ -1,0 +1,6 @@
+{
+    "name": "manga-scraper",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Manga/Comic scraper and viewer web application"
+}

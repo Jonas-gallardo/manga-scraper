@@ -1,0 +1,20 @@
+{
+    "db_host": "localhost",
+    "db_name": "comics_db",
+    "db_user": "root",
+    "db_pass": "",
+    "site_base_url": "https://es.3hentai.net",
+    "site_view_path": "/d",
+    "site_batch_path": "/search",
+    "site_view": "",
+    "site_parody": "",
+    "site_domain": "",
+    "download_path": "",
+    "delay_page_min": 1.5,
+    "delay_page_max": 3.5,
+    "delay_comic_min": 5,
+    "delay_comic_max": 10,
+    "max_retries": 2,
+    "curl_ssl_verify": false,
+    "saved_at": ""
+}

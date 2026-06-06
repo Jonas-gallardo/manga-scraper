@@ -1,0 +1,24 @@
+# Config with sensitive data (DB credentials)
+config.json
+
+# Logs
+logs/
+*.log
+
+# Downloads
+descargas/
+
+# Node.js
+node_modules/
+package-lock.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

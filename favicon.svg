@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <!-- Background rounded square -->
+  <rect width="64" height="64" rx="14" fill="url(#g)"/>
+  <!-- Comic book icon: book spine + pages -->
+  <rect x="16" y="14" width="24" height="36" rx="3" fill="#0d1117" opacity="0.85"/>
+  <rect x="18" y="16" width="20" height="32" rx="2" fill="#1a1f2e"/>
+  <!-- Page lines -->
+  <line x1="22" y1="24" x2="34" y2="24" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
+  <line x1="22" y1="29" x2="34" y2="29" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+  <line x1="22" y1="34" x2="30" y2="34" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+  <!-- Download arrow overlay -->
+  <polygon points="40,38 48,38 44,46" fill="#ffffff" opacity="0.9"/>
+  <rect x="43" y="42" width="2" height="10" rx="1" fill="#ffffff" opacity="0.9"/>
+  <!-- Sparkle accent -->
+  <circle cx="44" cy="22" r="2" fill="#ffffff" opacity="0.5"/>
+</svg>
