@@ -1,0 +1,57 @@
+# Comic Scraper Pro — Apache Rewrite Rules
+# 
+# Front Controller Pattern: Routes all requests through public/index.php
+# while preserving direct access to existing entry points for backward compatibility.
+#
+# If you want to use the Front Controller, uncomment the RewriteEngine and rules below.
+# Otherwise, the existing .php files work as before.
+
+# RewriteEngine On
+# 
+# # Do not rewrite existing files or directories
+# RewriteCond %{REQUEST_FILENAME} !-f
+# RewriteCond %{REQUEST_FILENAME} !-d
+# 
+# # Route everything through the front controller
+# RewriteRule ^(.*)$ public/index.php [QSA,L]
+
+# ── Security: Deny access to sensitive directories ──
+<IfModule mod_rewrite.c>
+    RewriteRule ^src/ - [F,L]
+    RewriteRule ^data/ - [F,L]
+    RewriteRule ^includes/ - [F,L]
+    RewriteRule ^vendor/ - [F,L]
+    RewriteRule ^composer\.json$ - [F,L]
+    RewriteRule ^package\.json$ - [F,L]
+</IfModule>
+
+# ── Security: Deny access to config files ──
+<FilesMatch "config\.json$">
+    Order Allow,Deny
+    Deny from all
+</FilesMatch>
+
+# ── Caching for static assets ──
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType image/webp "access plus 1 year"
+    ExpiresByType image/png "access plus 1 year"
+    ExpiresByType image/jpeg "access plus 1 year"
+    ExpiresByType image/gif "access plus 1 year"
+    ExpiresByType image/svg+xml "access plus 1 year"
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+    ExpiresByType application/json "access plus 0 seconds"
+</IfModule>
+
+# ── PHP Settings ──
+<IfModule mod_php.c>
+    php_value max_execution_time 300
+    php_value max_input_time 300
+    php_value memory_limit 256M
+    php_value upload_max_filesize 0
+    php_value post_max_size 0
+</IfModule>
+
+# ── Character set ──
+AddDefaultCharset UTF-8

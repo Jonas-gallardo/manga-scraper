@@ -2,704 +2,40 @@
 /**
  * TaxonomyData.php
  *
- * Contiene los datos de referencia de las taxonomías existentes en WordPress (Gluglux).
- * Estos datos se usan para normalizar, cruzar y evitar duplicados al procesar
- * contenido extraído desde la fuente de scraping.
+ * === DEPRECATED — Se mantiene solo por compatibilidad ===
  *
- * Arquitectura WordPress:
- *   - Etiquetas  → Taxonomía por defecto de WordPress
- *   - Universos  → Taxonomía personalizada (CPT UI)
- *   - Tipos      → Taxonomía personalizada (CPT UI)
- *   - Autores    → Taxonomía personalizada (CPT UI)
- *   - Idiomas    → Taxonomía personalizada (CPT UI)
+ * Ahora los datos se cargan desde archivos JSON mediante TaxonomyRepository.
+ * Esta clase sigue funcionando pero internamente delega en el repositorio.
  *
+ * Para nuevo código, usar:
+ *   $repo = new \ScrapApp\Repositories\TaxonomyRepository();
+ *   $repo->getTags();
+ *   $repo->getTagMappings();
+ *   $repo->getUniverses();
+ *   $repo->normalizeForSearch($text);
+ *
+ * @see \ScrapApp\Repositories\TaxonomyRepository
  * @package ScrapApp
  * @subpackage Taxonomy
+ * @deprecated Usar TaxonomyRepository en su lugar
  */
+
+require_once __DIR__ . '/../autoload.php';
 
 class TaxonomyData
 {
-    /**
-     * Lista de etiquetas existentes en WordPress.
-     * Formato: Array de strings con los nombres normalizados.
-     *
-     * @var array<string>
-     */
-    private static array $tags = [
-        '3d',
-        'Albina',
-        'Alien',
-        'Anal',
-        'Asfixia',
-        'Axila',
-        'BBW',
-        'beso negro',
-        'Bikini',
-        'Bondage',
-        'borracha',
-        'Bukkake',
-        'cambio de cuerpo',
-        'chantaje',
-        'Chica Demonio',
-        'Condon',
-        'Corrupcion',
-        'Cosplay',
-        'Culona',
-        'cum',
-        'Cumflacion',
-        'Delantal',
-        'Doble Anal',
-        'Doble penetracion',
-        'Drogas',
-        'Duende',
-        'Elfa',
-        'Embarazo',
-        'Entrenador',
-        'Escuela',
-        'Exhibicionismo',
-        'Filmar',
-        'Footjob',
-        'forzado',
-        'Furro',
-        'Futanari',
-        'Hermana',
-        'Historia',
-        'Hombre viejo',
-        'Impregnación',
-        'Incesto',
-        'infiel',
-        'Juguetes',
-        'Lactancia materna',
-        'Latex',
-        'lenceria',
-        'Lentes',
-        'lesbiana',
-        'Madrastra',
-        'madre',
-        'Mamada',
-        'mamada rusa',
-        'Masturbacion',
-        'MILF',
-        'Monja',
-        'Monstruo',
-        'morena',
-        'Musculosa',
-        'Navidad',
-        'Ninja',
-        'NTR',
-        'Oficina',
-        'oral (femenino)',
-        'Orco',
-        'Orgasmo (femenino)',
-        'Orgia',
-        'pelirroja',
-        'Pelo corto',
-        'pelo negro',
-        'Pene grande',
-        'Pezones',
-        'Pezones invertidos',
-        'Piercing',
-        'Pies',
-        'Policia (mujer)',
-        'POV',
-        'Primos',
-        'Profesora',
-        'Prostitucion',
-        'Rayos X',
-        'rubia',
-        'Shorts',
-        'Shota',
-        'Sirvienta',
-        'Solo mujeres',
-        'Tatuaje',
-        'Tentaculos',
-        'Tetas pequeñas',
-        'Tetona',
-        'Time Stop',
-        'tomboy',
-        'Trio',
-        'Virgen',
-        'yukata',
-    ];
+    private static ?\ScrapApp\Repositories\TaxonomyRepository $repo = null;
 
     /**
-     * MAPA DE EQUIVALENCIAS: tags del sitio origen (scraping) → tags del sitio destino (WordPress).
-     *
-     * Este diccionario resuelve el problema de taxonomías heterogéneas:
-     * el sitio de scraping usa etiquetas en inglés (ej. "big breasts (female)")
-     * mientras que el sitio destino (Gluglux) usa etiquetas en español (ej. "Tetona").
-     *
-     * Formato: 'tag_origen' => 'tag_destino'
-     * - La clave (tag_origen) es el valor exacto que se recibe del scraper, en minúsculas
-     * - El valor (tag_destino) es el nombre CANÓNICO en WordPress (como está en $tags)
-     *
-     * @var array<string, string>
+     * Obtiene (o crea) la instancia del repositorio.
      */
-    private static array $tagMappings = [
-        // ── Físico / Anatomía ──
-        'big breasts (female)'  => 'Tetona',
-        'big breasts'           => 'Tetona',
-        'large breasts'         => 'Tetona',
-        'huge breasts'          => 'Tetona',
-        'big areolae'           => 'Tetona',
-        'small breasts'         => 'Tetas pequeñas',
-        'flat chest'            => 'Tetas pequeñas',
-        'oppai loli'            => 'Tetas pequeñas',
-        'big penis'             => 'Pene grande',
-        'large penis'           => 'Pene grande',
-        'huge penis'            => 'Pene grande',
-        'big dick'              => 'Pene grande',
-        'horse cock'            => 'Pene grande',
-        'monster penis'         => 'Pene grande',
-        'nipples'               => 'Pezones',
-        'inverted nipples'      => 'Pezones invertidos',
-        'puffy nipples'         => 'Pezones',
-        'nipple fuck'           => 'Pezones',
-        'feet'                  => 'Pies',
-        'foot fetish'           => 'Pies',
-        'sole'                  => 'Pies',
-        'footjob'               => 'Footjob',
-        'armpit'                => 'Axila',
-        'armpits'               => 'Axila',
-        'armpit fetish'         => 'Axila',
-        'sweating'              => 'Axila',
-        'sweat'                 => 'Axila',
-        'muscle'                => 'Musculosa',
-        'muscular'              => 'Musculosa',
-        'muscle woman'          => 'Musculosa',
-        'muscles'               => 'Musculosa',
-        'thick thighs'          => 'Culona',
-        'thick'                 => 'Culona',
-        'big ass'               => 'Culona',
-        'large butt'            => 'Culona',
-        'ass'                   => 'Culona',
-        'bbw'                   => 'BBW',
-        'fat'                   => 'BBW',
-        'chubby'                => 'BBW',
-        'plus size'             => 'BBW',
-        'wide hips'             => 'Culona',
-
-        // ── Actos Sexuales ──
-        'anal'                  => 'Anal',
-        'anal sex'              => 'Anal',
-        'double anal'           => 'Doble Anal',
-        'double penetration'    => 'Doble penetracion',
-        'dp'                    => 'Doble penetracion',
-        'vaginal'               => 'Anal',      // genérico
-        'sex'                   => 'Anal',
-        'oral'                  => 'Mamada',
-        'fellatio'              => 'Mamada',
-        'blowjob'               => 'Mamada',
-        'blowjob (female)'      => 'Mamada',
-        'blowjob (male)'        => 'Mamada',
-        'deep throat'           => 'Mamada',
-        'irrumatio'             => 'Mamada',
-        'cock sucking'          => 'Mamada',
-        'cunnilingus'           => 'oral (femenino)',
-        'oral (female)'         => 'oral (femenino)',
-        'oral (male)'           => 'Mamada',
-        'cunnilingus (female)'  => 'oral (femenino)',
-        'paizuri'               => 'mamada rusa',
-        'titfuck'               => 'mamada rusa',
-        'titjob'                => 'mamada rusa',
-        'paizuri (female)'      => 'mamada rusa',
-        'breast job'            => 'mamada rusa',
-        'nakadashi'             => 'cum',
-        'creampie'              => 'cum',
-        'cum inside'            => 'cum',
-        'cum in mouth'          => 'cum',
-        'facial'                => 'cum',
-        'cum on face'           => 'cum',
-        'cum on body'           => 'cum',
-        'cumflation'            => 'Cumflacion',
-        'cumflation (female)'   => 'Cumflacion',
-        'inflation'             => 'Cumflacion',
-        'stomach deformation'   => 'Cumflacion',
-        'masturbation'          => 'Masturbacion',
-        'masturbating'          => 'Masturbacion',
-        'fingering'             => 'Masturbacion',
-        'vibrator'              => 'Juguetes',
-        'dildo'                 => 'Juguetes',
-        'sex toys'              => 'Juguetes',
-        'toys'                  => 'Juguetes',
-        'onahole'               => 'Juguetes',
-        'bondage'               => 'Bondage',
-        'bdsm'                  => 'Bondage',
-        'shibari'               => 'Bondage',
-        'kinbaku'               => 'Bondage',
-        'restraints'            => 'Bondage',
-        'tied up'               => 'Bondage',
-        'handcuffs'             => 'Bondage',
-        'choking'               => 'Asfixia',
-        'strangling'            => 'Asfixia',
-        'breath play'           => 'Asfixia',
-        'asphyxiation'          => 'Asfixia',
-        'foot worship'          => 'Pies',
-        'rimjob'                => 'Anal',
-        'ahegao'                => 'Orgasmo (femenino)',
-        'orgasm'                => 'Orgasmo (femenino)',
-        'orgasm (female)'       => 'Orgasmo (femenino)',
-        'multiple orgasms'      => 'Orgasmo (femenino)',
-        'skull fucking'         => 'Mamada',
-        'face fucking'          => 'Mamada',
-        'face sitting'          => 'oral (femenino)',
-        'tribadism'             => 'lesbiana',
-
-        // ── Tipos de Contenido / Categorías ──
-        'monster'               => 'Monstruo',
-        'monster girl'          => 'Chica Demonio',
-        'monster boy'           => 'Monstruo',
-        'demon'                 => 'Chica Demonio',
-        'demon girl'            => 'Chica Demonio',
-        'demon boy'             => 'Chica Demonio',
-        'succubus'              => 'Chica Demonio',
-        'incubus'               => 'Chica Demonio',
-        'elf'                   => 'Elfa',
-        'dark elf'              => 'Elfa',
-        'high elf'              => 'Elfa',
-        'fairy'                 => 'Duende',
-        'goblin'                => 'Orco',
-        'orc'                   => 'Orco',
-        'tentacles'             => 'Tentaculos',
-        'tentacle'              => 'Tentaculos',
-        'tentacle rape'         => 'Tentaculos',
-        'alien'                 => 'Alien',
-        'robot'                 => 'Monstruo',
-        'android'               => 'Monstruo',
-        'cyborg'                => 'Monstruo',
-        'ghost'                 => 'Chica Demonio',
-        'spirit'                => 'Chica Demonio',
-        'zombie'                => 'Monstruo',
-        'vampire'               => 'Chica Demonio',
-        'werewolf'              => 'Monstruo',
-        'cat girl'              => 'Furro',
-        'catgirl'               => 'Furro',
-        'cat ears'              => 'Furro',
-        'nekomimi'              => 'Furro',
-        'fox girl'              => 'Furro',
-        'kitsune'               => 'Furro',
-        'dog girl'              => 'Furro',
-        'kemonomimi'            => 'Furro',
-        'animal ears'           => 'Furro',
-        'furry'                 => 'Furro',
-        'furro'                 => 'Furro',
-        'scalie'                => 'Furro',
-
-        // ── Ropa / Vestimenta ──
-        'glasses'               => 'Lentes',
-        'eyeglasses'            => 'Lentes',
-        'spectacles'            => 'Lentes',
-        'school uniform'        => 'Escuela',
-        'schoolgirl uniform'    => 'Escuela',
-        'seifuku'               => 'Escuela',
-        'uniform'               => 'Escuela',
-        'bikini'                => 'Bikini',
-        'swimsuit'              => 'Bikini',
-        'swimwear'              => 'Bikini',
-        'swimming suit'         => 'Bikini',
-        'one piece swimsuit'    => 'Bikini',
-        'maid'                  => 'Sirvienta',
-        'maid outfit'           => 'Sirvienta',
-        'maid uniform'          => 'Sirvienta',
-        'nun'                   => 'Monja',
-        'nun outfit'            => 'Monja',
-        'cosplay'               => 'Cosplay',
-        'cosplaying'            => 'Cosplay',
-        'costume'               => 'Cosplay',
-        'lingerie'              => 'lenceria',
-        'panties'               => 'lenceria',
-        'underwear'             => 'lenceria',
-        'bra'                   => 'lenceria',
-        'stockings'             => 'lenceria',
-        'pantyhose'             => 'lenceria',
-        'thighhighs'            => 'lenceria',
-        'garter belt'           => 'lenceria',
-        'corset'                => 'lenceria',
-        'latex'                 => 'Latex',
-        'leather'               => 'Latex',
-        'rubber'                => 'Latex',
-        'vinyl'                 => 'Latex',
-        'pvc'                   => 'Latex',
-        'apron'                 => 'Delantal',
-        'waitress'              => 'Sirvienta',
-        'police'                => 'Policia (mujer)',
-        'policewoman'           => 'Policia (mujer)',
-        'female police'         => 'Policia (mujer)',
-        'cop'                   => 'Policia (mujer)',
-        'police uniform'        => 'Policia (mujer)',
-        'nurse'                 => 'Sirvienta',
-        'nurse outfit'          => 'Sirvienta',
-        'office lady'           => 'Oficina',
-        'ol'                    => 'Oficina',
-        'office'                => 'Oficina',
-        'business suit'         => 'Oficina',
-        'suit'                  => 'Oficina',
-        'salarywoman'           => 'Oficina',
-        'yukata'                => 'yukata',
-        'kimono'                => 'yukata',
-        'shorts'                => 'Shorts',
-        'short shorts'          => 'Shorts',
-        'miniskirt'             => 'Shorts',
-        'skirt'                 => 'Shorts',
-        'tattoo'                => 'Tatuaje',
-        'tattoos'               => 'Tatuaje',
-        'body painting'         => 'Tatuaje',
-        'piercing'              => 'Piercing',
-        'piercings'             => 'Piercing',
-        'naval piercing'        => 'Piercing',
-        'collared'              => 'Bondage',
-
-        // ── Relaciones / Roles ──
-        'incest'                => 'Incesto',
-        'mother'                => 'madre',
-        'mom'                   => 'madre',
-        'mother and son'        => 'madre',
-        'mother and daughter'   => 'madre',
-        'sister'                => 'Hermana',
-        'little sister'         => 'Hermana',
-        'younger sister'        => 'Hermana',
-        'older sister'          => 'Hermana',
-        'onee-san'              => 'Hermana',
-        'brother and sister'    => 'Incesto',
-        'father and daughter'   => 'Incesto',
-        'father'                => 'Hombre viejo',
-        'dad'                   => 'Hombre viejo',
-        'aunt'                  => 'Madrastra',
-        'stepmother'            => 'Madrastra',
-        'step mom'              => 'Madrastra',
-        'stepsister'            => 'Hermana',
-        'step sister'           => 'Hermana',
-        'cousin'                => 'Primos',
-        'twins'                 => 'Primos',
-        'twin sisters'          => 'Hermana',
-        'milf'                  => 'MILF',
-        'milf (female)'         => 'MILF',
-        'teacher'               => 'Profesora',
-        'sensei'                => 'Profesora',
-        'female teacher'        => 'Profesora',
-        'trainer'               => 'Entrenador',
-        'coach'                 => 'Entrenador',
-        'gym'                   => 'Musculosa',
-        'student'               => 'Escuela',
-        'schoolgirl'            => 'Escuela',
-        'delinquent'            => 'Escuela',
-        'yandere'               => 'Chica Demonio',
-        'tsundere'              => 'Chica Demonio',
-        'old man'               => 'Hombre viejo',
-        'old man (male)'        => 'Hombre viejo',
-        'aged care'             => 'Hombre viejo',
-        'grandpa'               => 'Hombre viejo',
-        'elderly man'           => 'Hombre viejo',
-        'virgin'                => 'Virgen',
-        'virginity'             => 'Virgen',
-        'first time'            => 'Virgen',
-        'defloration'           => 'Virgen',
-        'prostitution'          => 'Prostitucion',
-        'prostitute'            => 'Prostitucion',
-        'hooker'                => 'Prostitucion',
-        'escort'                => 'Prostitucion',
-        'paid sex'              => 'Prostitucion',
-        'whore'                 => 'Prostitucion',
-        'slut'                  => 'Prostitucion',
-
-        // ── Situaciones / Tramas ──
-        'netorare'              => 'NTR',
-        'ntr'                   => 'NTR',
-        'netorare (female)'     => 'NTR',
-        'netorare (male)'       => 'NTR',
-        'netorase'              => 'NTR',
-        'netori'                => 'NTR',
-        'cuckold'               => 'NTR',
-        'cuckolding'            => 'NTR',
-        'cheating'              => 'infiel',
-        'cheating wife'         => 'infiel',
-        'adultery'              => 'infiel',
-        'infidelity'            => 'infiel',
-        'affair'                => 'infiel',
-        'love triangle'         => 'Trio',
-        'mind break'            => 'Corrupcion',
-        'corruption'            => 'Corrupcion',
-        'mind control'          => 'Corrupcion',
-        'brainwashing'          => 'Corrupcion',
-        'hypnosis'              => 'Corrupcion',
-        'hypnotized'            => 'Corrupcion',
-        'drugs'                 => 'Drogas',
-        'drug'                  => 'Drogas',
-        'aphrodisiac'           => 'Drogas',
-        'date rape drug'        => 'Drogas',
-        'drunk'                 => 'borracha',
-        'alcohol'               => 'borracha',
-        'drinking'              => 'borracha',
-        'drunken'               => 'borracha',
-        'blackmail'             => 'chantaje',
-        'extortion'             => 'chantaje',
-        'body swap'             => 'cambio de cuerpo',
-        'gender bender'         => 'cambio de cuerpo',
-        'gender swap'           => 'cambio de cuerpo',
-        'sex change'            => 'cambio de cuerpo',
-        'transformation'        => 'cambio de cuerpo',
-        'exhibitionism'         => 'Exhibicionismo',
-        'exhibitionist'         => 'Exhibicionismo',
-        'public sex'            => 'Exhibicionismo',
-        'public nudity'         => 'Exhibicionismo',
-        'flashing'              => 'Exhibicionismo',
-        'voyeur'                => 'Filmar',
-        'voyeurism'             => 'Filmar',
-        'filming'               => 'Filmar',
-        'recorded'              => 'Filmar',
-        'camera'                => 'Filmar',
-        'hidden camera'         => 'Filmar',
-        'peeping'               => 'Filmar',
-        'pregnancy'             => 'Embarazo',
-        'pregnant'              => 'Embarazo',
-        'impregnation'          => 'Impregnación',
-        'forced pregnancy'      => 'Impregnación',
-        'breeding'              => 'Impregnación',
-        'lactation'             => 'Lactancia materna',
-        'breastfeeding'         => 'Lactancia materna',
-        'milking'               => 'Lactancia materna',
-        'breast milk'           => 'Lactancia materna',
-        'x-ray'                 => 'Rayos X',
-        'xray'                  => 'Rayos X',
-        'see through'           => 'Rayos X',
-        'visible organs'        => 'Rayos X',
-        'transparent'           => 'Rayos X',
-        'time stop'             => 'Time Stop',
-        'time stop (female)'    => 'Time Stop',
-        'frozen'                => 'Time Stop',
-        'freeze'                => 'Time Stop',
-        'halloween'             => 'Cosplay',
-        'christmas'             => 'Navidad',
-        'xmas'                  => 'Navidad',
-        'winter'                => 'Navidad',
-        'snow'                  => 'Navidad',
-
-        // ── Violencia / Forzado ──
-        'chikan'                => 'forzado',
-        'groping'               => 'forzado',
-        'forced'                => 'forzado',
-        'rape'                  => 'forzado',
-        'gang rape'             => 'forzado',
-        'non consensual'        => 'forzado',
-        'dubious consent'       => 'forzado',
-        'kidnapping'            => 'forzado',
-        'kidnapped'             => 'forzado',
-
-        // ── Orientación / Género ──
-        'yuri'                  => 'lesbiana',
-        'lesbian'               => 'lesbiana',
-        'girl on girl'          => 'lesbiana',
-        'gl'                    => 'lesbiana',
-        'futanari'              => 'Futanari',
-        'dickgirl'              => 'Futanari',
-        'dickgirl on male'      => 'Futanari',
-        'dickgirl on girl'      => 'Futanari',
-        'dickgirl on dickgirl'  => 'Futanari',
-        'dildo girl'            => 'Futanari',
-        'femdom'                => 'Musculosa',
-        'female dominant'       => 'Musculosa',
-        'female domination'     => 'Musculosa',
-        'male domination'       => 'forzado',
-        'shota'                 => 'Shota',
-        'shotacon'              => 'Shota',
-        'loli'                  => 'Shota',
-        'lolicon'               => 'Shota',
-        'lolicon (female)'      => 'Shota',
-        'tomgirl'               => 'tomboy',
-        'tomboy'                => 'tomboy',
-        'crossdressing'         => 'tomboy',
-        'crossdresser'          => 'tomboy',
-        'trap'                  => 'tomboy',
-        'gender bender male'    => 'cambio de cuerpo',
-        'solo female'           => 'Solo mujeres',
-        'sole female'           => 'Solo mujeres',
-        'females only'          => 'Solo mujeres',
-        'female only'           => 'Solo mujeres',
-        'solo male'             => 'Solo mujeres',   // fallback genérico
-        'male only'             => 'Solo mujeres',
-        'group'                 => 'Orgia',
-        'orgy'                  => 'Orgia',
-        'threesome'             => 'Trio',
-        'foursome'              => 'Orgia',
-        'gangbang'              => 'Orgia',
-        'bukkake'               => 'Bukkake',
-        'pov'                   => 'POV',
-        'point of view'         => 'POV',
-        'first person'          => 'POV',
-        'condom'                => 'Condon',
-        'condomless'            => 'cum',
-        'wrapped'               => 'Condon',
-        'wearing condom'        => 'Condon',
-        'no condom'             => 'cum',
-
-        // ── Estilos / Misc ──
-        'story'                 => 'Historia',
-        'story arc'             => 'Historia',
-        'plot'                  => 'Historia',
-        'storyline'             => 'Historia',
-        'full story'            => 'Historia',
-        'full color'            => 'Historia',
-        'color'                 => 'Historia',
-        'colored'               => 'Historia',
-        'ninja'                 => 'Ninja',
-        'samurai'               => 'Ninja',
-        'dark skin'             => 'morena',
-        'tanned'                => 'morena',
-        'tan'                   => 'morena',
-        'tan lines'             => 'morena',
-        'gym tan'               => 'morena',
-        'blonde'                => 'rubia',
-        'blond'                 => 'rubia',
-        'blonde hair'           => 'rubia',
-        'red hair'              => 'pelirroja',
-        'ginger'                => 'pelirroja',
-        'orange hair'           => 'pelirroja',
-        'black hair'            => 'pelo negro',
-        'dark hair'             => 'pelo negro',
-        'short hair'            => 'Pelo corto',
-        'long hair'             => 'Pelo corto',
-        'ponytail'              => 'Pelo corto',
-        'twin tails'            => 'Pelo corto',
-        'twinbraids'            => 'Pelo corto',
-        'braids'                => 'Pelo corto',
-        'bunny girl'            => 'Cosplay',
-        'bunny outfit'          => 'Cosplay',
-        'playboy bunny'         => 'Cosplay',
-        'straight hair'         => 'Pelo corto',
-        'curly hair'            => 'Pelo corto',
-        'hair decoration'       => 'Pelo corto',
-        'eyepatch'              => 'Lentes',
-        'mask'                  => 'Ninja',
-        'veil'                  => 'Monja',
-        'chinese dress'         => 'Cosplay',
-        'cheongsam'             => 'Cosplay',
-        'qipao'                 => 'Cosplay',
-        'horse ears'            => 'Furro',
-        'horn'                  => 'Chica Demonio',
-        'horns'                 => 'Chica Demonio',
-        'wings'                 => 'Chica Demonio',
-        'tail'                  => 'Furro',
-        'pointy ears'           => 'Elfa',
-        'monster ears'          => 'Furro',
-        'dark past'             => 'Corrupcion',
-        'tragic past'           => 'Corrupcion',
-        'ugly bastard'          => 'Hombre viejo',
-        'ugly'                  => 'Hombre viejo',
-        'ugly man'              => 'Hombre viejo',
-        'beast'                 => 'Monstruo',
-        'beastman'              => 'Furro',
-        'beast girl'            => 'Furro',
-        'centaur'               => 'Monstruo',
-        'minotaur'              => 'Monstruo',
-        'slime'                 => 'Monstruo',
-        'ghost girl'            => 'Chica Demonio',
-        'dragon'                => 'Monstruo',
-        'dragon girl'           => 'Chica Demonio',
-        'angel'                 => 'Chica Demonio',
-        'fallen angel'          => 'Chica Demonio',
-        'devil'                 => 'Chica Demonio',
-        'goddess'               => 'Chica Demonio',
-        'miko'                  => 'Monja',
-        'shrine maiden'         => 'Monja',
-        'priestess'             => 'Monja',
-        'witch'                 => 'Chica Demonio',
-        'magical girl'          => 'Chica Demonio',
-        'mahou shoujo'          => 'Chica Demonio',
-        'idol'                  => 'Cosplay',
-        'pop idol'              => 'Cosplay',
-        'singer'                => 'Cosplay',
-        'actress'               => 'Cosplay',
-        'model'                 => 'Cosplay',
-        'stewardess'            => 'Sirvienta',
-        'flight attendant'      => 'Sirvienta',
-        'waitress'              => 'Sirvienta',
-        'bartender'             => 'Sirvienta',
-        'cafe'                  => 'Sirvienta',
-        'hostess'               => 'Sirvienta',
-        'princess'              => 'Cosplay',
-        'queen'                 => 'Chica Demonio',
-        'empress'               => 'Chica Demonio',
-        'nobility'              => 'Historia',
-        'slave'                 => 'Bondage',
-        'slave girl'            => 'Bondage',
-        'petplay'               => 'Furro',
-        'pet girl'              => 'Furro',
-        'leash'                 => 'Bondage',
-        'collar'                => 'Bondage',
-
-        // ── Mapeos específicos para 3hentai.net ──
-        // Tags con modificador de género que no tienen equivalente directo
-        // se resuelven mediante el step 3 de matchExisting() (sin modificador).
-        'anal (male)'              => 'Anal',
-        'anal intercourse (male)'  => 'Anal',
-    ];
-
-    /**
-     * Lista de universos (series) existentes en WordPress.
-     * Formato: Array de strings con los nombres originales.
-     *
-     * @var array<string>
-     */
-    private static array $universes = [
-        'Attack On Titan',
-        'Avatar',
-        'Bayonetta',
-        'Ben 10',
-        'Black Clover',
-        'Bleach',
-        'Chainsaw Man',
-        'Cyberpunk Edgerunners',
-        'Dandadan',
-        'Danny Phantom',
-        'Demon Slayer',
-        'Dexter',
-        'Dragon Ball',
-        'Drama Total',
-        'Evangelion',
-        'Futurama',
-        'Genshin Impact',
-        'Gravity Falls',
-        'Helluva Boss',
-        'Hora de Aventura',
-        'Hotel Transylvania',
-        'Johnny Bravo',
-        'Jovenes Titanes',
-        'Jujutsu Kaisen',
-        'Kick Buttowski',
-        'Kim Possible',
-        'La Liga de la Justicia',
-        'Liga de la justicia',
-        'Los Padrinos Magicos',
-        'Los Picapiedra',
-        'Los Simpson',
-        'Miraculous',
-        'Monsters Inc',
-        'My Hero Academy',
-        'Naruto',
-        'Nier Automata',
-        'One Piece',
-        'One Punch Man',
-        'Padre Americano',
-        'Padre de familia',
-        'Phineas and Ferb',
-        'Pokemon',
-        'Pucca',
-        'Rick and Morty',
-        'Samurai Jack',
-        'Scooby Doo',
-        'Spiderman',
-        'Star vs Las Fuerzas del Mal',
-        'Star Wars',
-        'Steven Universe',
-        'Sym-Bionic Titan',
-        'The Amazing World of Gumball',
-        'The Legend of Zelda',
-        'The Owl House',
-        'Thundercats',
-        'Transformers',
-        'un show mas',
-        'Wall‑E',
-    ];
+    private static function getRepo(): \ScrapApp\Repositories\TaxonomyRepository
+    {
+        if (self::$repo === null) {
+            self::$repo = new \ScrapApp\Repositories\TaxonomyRepository();
+        }
+        return self::$repo;
+    }
 
     /**
      * Retorna la lista completa de etiquetas existentes.
@@ -708,7 +44,7 @@ class TaxonomyData
      */
     public static function getTags(): array
     {
-        return self::$tags;
+        return self::getRepo()->getTags();
     }
 
     /**
@@ -718,22 +54,17 @@ class TaxonomyData
      */
     public static function getTagMappings(): array
     {
-        return self::$tagMappings;
+        return self::getRepo()->getTagMappings();
     }
 
     /**
-     * Retorna el mapa de equivalencias con claves normalizadas para búsqueda rápida.
+     * Retorna el mapa de equivalencias con claves normalizadas.
      *
-     * @return array<string, string>  normalized_source_key → target_tag (minúsculas)
+     * @return array<string, string>
      */
     public static function getTagMappingsNormalized(): array
     {
-        $normalized = [];
-        foreach (self::$tagMappings as $source => $target) {
-            $key = self::normalizeForSearch($source);
-            $normalized[$key] = mb_strtolower($target, 'UTF-8');
-        }
-        return $normalized;
+        return self::getRepo()->getTagMappingsNormalized();
     }
 
     /**
@@ -743,54 +74,37 @@ class TaxonomyData
      */
     public static function getUniverses(): array
     {
-        return self::$universes;
+        return self::getRepo()->getUniverses();
     }
 
     /**
-     * Retorna las etiquetas en un formato normalizado para búsqueda.
-     * Todas en minúsculas, con espacios y sin caracteres extraños.
+     * Retorna las etiquetas normalizadas para búsqueda.
      *
-     * @return array<string>  Claves normalizadas (lowercase) + valores originales
+     * @return array<string, string>
      */
     public static function getTagsNormalized(): array
     {
-        $normalized = [];
-        foreach (self::$tags as $tag) {
-            $key = self::normalizeForSearch($tag);
-            $normalized[$key] = $tag;
-        }
-        return $normalized;
+        return self::getRepo()->getTagsNormalized();
     }
 
     /**
-     * Retorna los universos en un formato normalizado para búsqueda.
-     * Todas en minúsculas para matching fuzzy.
+     * Retorna los universos normalizados para búsqueda.
      *
-     * @return array<string, string>  Clave normalizada → valor original
+     * @return array<string, string>
      */
     public static function getUniversesNormalized(): array
     {
-        $normalized = [];
-        foreach (self::$universes as $universe) {
-            $key = self::normalizeForSearch($universe);
-            $normalized[$key] = $universe;
-        }
-        return $normalized;
+        return self::getRepo()->getUniversesNormalized();
     }
 
     /**
-     * Normaliza un string para búsqueda: minúsculas, sin puntuación redundante,
-     * espacios simples.
+     * Normaliza un string para búsqueda.
      *
      * @param string $text
      * @return string
      */
     public static function normalizeForSearch(string $text): string
     {
-        $text = mb_strtolower(trim($text), 'UTF-8');
-        // Reemplazar guiones y múltiples espacios por un solo espacio
-        $text = preg_replace('/[–—_-]+/u', ' ', $text);
-        $text = preg_replace('/\s+/u', ' ', $text);
-        return trim($text);
+        return self::getRepo()->normalizeForSearch($text);
     }
 }

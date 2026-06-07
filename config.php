@@ -79,193 +79,43 @@ define('SCRAPER_STOP_FILE', sys_get_temp_dir() . '/scraper_stop.flag');
 
 /**
  * Escanea un directorio y devuelve imágenes ordenadas.
- * Reemplaza a glob() que falla con caracteres no-ASCII en las rutas.
+ * Delega a ImageService.
  *
  * @param string $dir Ruta absoluta del directorio
  * @return array<string> Array de rutas completas de imágenes
  */
 function escanear_imagenes(string $dir): array {
-    $extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-    $files = [];
-
-    if (!is_dir($dir)) {
-        return $files;
+    static $service = null;
+    if ($service === null) {
+        $service = new \ScrapApp\Services\ImageService();
     }
-
-    $handle = opendir($dir);
-    if ($handle === false) {
-        return $files;
-    }
-
-    while (($entry = readdir($handle)) !== false) {
-        if ($entry === '.' || $entry === '..') continue;
-        $path = $dir . '/' . $entry;
-        if (is_file($path)) {
-            $ext = strtolower(pathinfo($entry, PATHINFO_EXTENSION));
-            if (in_array($ext, $extensions)) {
-                $files[] = $path;
-            }
-        }
-    }
-    closedir($handle);
-
-    natsort($files);
-    return array_values($files);
+    return $service->scanImages($dir);
 }
 
 /**
  * Calcula el tamaño total en bytes de un directorio (incluye subdirectorios).
+ * Delega a FileService.
  */
 function calcular_tamano_dir(string $dir): int {
-    $size = 0;
-    $files = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($dir, RecursiveDirectoryIterator::SKIP_DOTS)
-    );
-    foreach ($files as $file) {
-        $size += $file->getSize();
+    static $service = null;
+    if ($service === null) {
+        $service = new \ScrapApp\Services\FileService();
     }
-    return $size;
+    return $service->calculateDirectorySize($dir);
 }
 
 /**
  * Convierte TODAS las imágenes de un directorio de cómic a WebP.
- * Usa PHP GD (imagewebp) como método principal — más fiable con rutas UTF-8,
- * caracteres especiales y permisos. Fallback a cwebp CLI si GD no está disponible.
+ * Delega a ImageService.
  *
  * @param string $dir_path Ruta absoluta del directorio del cómic
  * @param int $quality Calidad WebP (1-100), default 85
  * @return array{converted: int, skipped: int, failed: int, bytes_original: int, bytes_webp: int, bytes_ahorrados: int}
  */
 function convertir_comic_a_webp(string $dir_path, int $quality = 85): array {
-    $stats = [
-        'converted'      => 0,
-        'skipped'        => 0,
-        'failed'         => 0,
-        'bytes_original' => 0,
-        'bytes_webp'     => 0,
-        'bytes_ahorrados' => 0,
-    ];
-
-    if (!is_dir($dir_path)) {
-        return $stats;
+    static $service = null;
+    if ($service === null) {
+        $service = new \ScrapApp\Services\ImageService();
     }
-
-    // Extensiones a convertir (excluimos webp y avif)
-    $extensions = ['jpg', 'jpeg', 'png', 'gif'];
-
-    $handle = opendir($dir_path);
-    if ($handle === false) {
-        return $stats;
-    }
-
-    $files = [];
-    while (($entry = readdir($handle)) !== false) {
-        if ($entry === '.' || $entry === '..') continue;
-        $path = $dir_path . '/' . $entry;
-        if (is_file($path)) {
-            $ext = strtolower(pathinfo($entry, PATHINFO_EXTENSION));
-            if (in_array($ext, $extensions)) {
-                $files[] = $path;
-            }
-        }
-    }
-    closedir($handle);
-
-    natsort($files);
-
-    foreach ($files as $filepath) {
-        $info = pathinfo($filepath);
-        $filename_no_ext = $info['filename'];
-        $webp_path = $info['dirname'] . '/' . $filename_no_ext . '.webp';
-
-        // Si el webp destino YA existe, considerar como convertido y borrar original
-        if (file_exists($webp_path)) {
-            $stats['skipped']++;
-            $orig_size = @filesize($filepath);
-            $webp_size = @filesize($webp_path);
-            $stats['bytes_original'] += $orig_size ?: 0;
-            $stats['bytes_webp'] += $webp_size ?: 0;
-            @unlink($filepath); // Borrar original duplicado
-            continue;
-        }
-
-        $original_size = @filesize($filepath);
-        if ($original_size === false || $original_size === 0) {
-            $stats['failed']++;
-            continue;
-        }
-
-        $exito = false;
-
-        // ── CONVERSIÓN A WebP ──
-        // Usamos cwebp CLI vía temp para evitar dos problemas:
-        //   1. XAMPP (Apache) tiene libstdc++ antigua que rompe cwebp →
-        //      se soluciona con LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
-        //   2. cwebp no puede escribir en rutas con caracteres UTF-8 →
-        //      se escribe a /tmp y luego se copia con PHP
-        //   3. PHP GD no tiene imagewebp() disponible en este servidor
-        //
-        // Estrategia: escribir a temp (ASCII), luego file_get_contents + file_put_contents
-
-        $temp_webp = sys_get_temp_dir() . '/' . uniqid('cwebp_', true) . '.webp';
-
-        // ── Intento 1: cwebp con LD_LIBRARY_PATH (para XAMPP/Apache) ──
-        $cmd1 = sprintf(
-            'LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu cwebp -q %d %s -o %s 2>/dev/null',
-            $quality,
-            escapeshellarg($filepath),
-            escapeshellarg($temp_webp)
-        );
-        $ret1 = -1;
-        exec($cmd1, $out1, $ret1);
-
-        // ── Intento 2: cwebp sin LD_LIBRARY_PATH (para CLI, si el primero falló) ──
-        if ($ret1 !== 0 || !file_exists($temp_webp) || filesize($temp_webp) === 0) {
-            $cmd2 = sprintf(
-                'cwebp -q %d %s -o %s 2>/dev/null',
-                $quality,
-                escapeshellarg($filepath),
-                escapeshellarg($temp_webp)
-            );
-            $ret2 = -1;
-            exec($cmd2, $out2, $ret2);
-
-            // Si ambos fallaron, limpiar temp
-            if (($ret2 !== 0 || !file_exists($temp_webp) || filesize($temp_webp) === 0)) {
-                if (file_exists($temp_webp)) @unlink($temp_webp);
-            }
-        }
-
-        // ── Copiar desde temp al destino final ──
-        if (file_exists($temp_webp) && filesize($temp_webp) > 0) {
-            $webp_data = @file_get_contents($temp_webp);
-            if ($webp_data !== false) {
-                $escrito = @file_put_contents($webp_path, $webp_data);
-                if ($escrito !== false && file_exists($webp_path) && filesize($webp_path) > 0) {
-                    $exito = true;
-                }
-            }
-            @unlink($temp_webp);
-        }
-
-        if ($exito) {
-            $webp_size = @filesize($webp_path) ?: 0;
-            $stats['converted']++;
-            $stats['bytes_original'] += $original_size;
-            $stats['bytes_webp'] += $webp_size;
-
-            // Eliminar el archivo original pesado
-            @unlink($filepath);
-        } else {
-            $stats['failed']++;
-            // Si falló pero dejó un archivo basura, limpiarlo
-            if (file_exists($webp_path)) {
-                @unlink($webp_path);
-            }
-        }
-    }
-
-    $stats['bytes_ahorrados'] = $stats['bytes_original'] - $stats['bytes_webp'];
-
-    return $stats;
+    return $service->convertToWebp($dir_path, $quality);
 }

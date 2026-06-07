@@ -22,3 +22,8 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Composer / vendor
+vendor/
+composer
+composer.phar

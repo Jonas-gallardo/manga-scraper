@@ -1,0 +1,28 @@
+{
+    "name": "scrapapp/comic-scraper-pro",
+    "description": "Comic Scraper Pro - Sistema de scraping y gestión de taxonomías",
+    "type": "project",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "ScrapApp\\": "src/"
+        }
+    },
+    "require": {
+        "php": ">=8.1",
+        "ext-pdo": "*",
+        "ext-curl": "*",
+        "ext-mbstring": "*",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0"
+    },
+    "scripts": {
+        "test": "phpunit --colors=always",
+        "test:coverage": "phpunit --colors=always --coverage-html coverage/"
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}
