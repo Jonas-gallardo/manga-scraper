@@ -39,10 +39,22 @@ class UniverseProcessor
     /**
      * @param float $fuzzyThreshold Umbral de similitud (default 0.75)
      */
-    public function __construct(float $fuzzyThreshold = 0.75)
+    public function __construct(float $fuzzyThreshold = 0.82)
     {
         $this->existingUniverses = TaxonomyData::getUniversesNormalized();
         $this->fuzzyThreshold = $fuzzyThreshold;
+
+        // ── Cargar universos personalizados desde data/custom_mappings.json ──
+        $customFile = __DIR__ . '/../data/custom_mappings.json';
+        if (file_exists($customFile)) {
+            $customData = json_decode(file_get_contents($customFile), true);
+            if (is_array($customData) && isset($customData['universes'])) {
+                foreach ($customData['universes'] as $univName) {
+                    $key = TaxonomyData::normalizeForSearch($univName);
+                    $this->existingUniverses[$key] = $univName;
+                }
+            }
+        }
     }
 
     /**
@@ -207,6 +219,10 @@ class UniverseProcessor
     {
         $searchKey = TaxonomyData::normalizeForSearch($universeName);
 
+        // ── 0. Validar longitud mínima para fuzzy matching ──
+        // Strings de 1-2 caracteres NO deben hacer fuzzy match (evita "k"→"Attack On Titan")
+        $keyLength = strlen($searchKey);
+
         // ── 1. Búsqueda exacta normalizada ──
         if (isset($this->existingUniverses[$searchKey])) {
             // Devolver siempre en minúsculas (regla estricta #1)
@@ -214,16 +230,28 @@ class UniverseProcessor
         }
 
         // ── 2. Búsqueda por similitud (fuzzy) ──
+        // Solo para strings de longitud suficiente
+        if ($keyLength < 3) {
+            return null;
+        }
+
         $bestMatch = null;
         $bestScore = 0.0;
+
+        // Umbral dinámico: strings cortos necesitan más exactitud
+        $dynamicThreshold = $this->fuzzyThreshold;
+        if ($keyLength < 5) {
+            // Strings de 3-4 caracteres: umbral 0.90
+            $dynamicThreshold = max($dynamicThreshold, 0.90);
+        }
 
         foreach ($this->existingUniverses as $existingKey => $existingValue) {
             $score = 0.0;
             similar_text($searchKey, $existingKey, $score);
             $score /= 100.0;
 
-            // Bono por substring match
-            if ($score < 1.0) {
+            // Bono por substring match (solo si ya hay una similitud base ≥ 60%)
+            if ($score < 1.0 && $score >= 0.60) {
                 if (strpos($existingKey, $searchKey) !== false || strpos($searchKey, $existingKey) !== false) {
                     $score = max($score, 0.85);
                 }
@@ -235,7 +263,7 @@ class UniverseProcessor
             }
         }
 
-        if ($bestMatch !== null && $bestScore >= $this->fuzzyThreshold) {
+        if ($bestMatch !== null && $bestScore >= $dynamicThreshold) {
             // Devolver siempre en minúsculas
             return mb_strtolower($bestMatch, 'UTF-8');
         }
@@ -250,6 +278,6 @@ class UniverseProcessor
      */
     public function getExistingUniverses(): array
     {
-        return TaxonomyData::getUniverses();
+        return $this->existingUniverses;
     }
 }

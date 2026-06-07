@@ -394,6 +394,19 @@ function extraer_personajes(DOMXPath $xpath): ?string {
 }
 
 /**
+ * Extrae los artistas / autores del cómic desde la sección "Artistas:".
+ * En el sitio de origen se llaman "Artistas", pero en WordPress se
+ * asignarán a la taxonomía "autor".
+ *
+ * @param DOMXPath $xpath
+ * @return string|null Nombres de artistas separados por coma, o null
+ */
+function extraer_artistas(DOMXPath $xpath): ?string {
+    $values = extraer_valores_seccion($xpath, 'Artistas:');
+    return !empty($values) ? implode(', ', array_unique($values)) : null;
+}
+
+/**
  * Extrae la categoría del cómic desde la sección "Categorías:".
  *
  * @param DOMXPath $xpath
@@ -1087,28 +1100,39 @@ if ($action === 'single') {
     $series       = extraer_series($xpath);                  // "Series:" section → universos
     $personajes   = extraer_personajes($xpath);              // "Personajes:" section → personajes
     $categorias   = extraer_categorias($xpath);              // "Categorías:" section → tipos
+
+    // ── Forzar tipo "manga" cuando la fuente es 3hentai.net ──
+    // En 3hentai las categorías pueden ser "doujinshi", "manga", etc.
+    // Pero para el sitio destino (Gluglux), todo lo que viene de 3hentai
+    // debe clasificarse como "manga".
+    if (defined('SITE_BASE') && stripos(SITE_BASE, '3hentai') !== false) {
+        $categorias = 'manga';
+    }
     $sinopsis     = extraer_sinopsis($xpath, $html);
     $idioma       = extraer_idioma($xpath, $html);
     $rating       = extraer_rating($xpath, $html);
 
-    // Nota: artista no se extrae directamente, usamos autor como fallback
-    $artista = null;
+    // ── Extraer Artistas (sección "Artistas:" del HTML) ──
+    // En el sitio 3hentai los artistas están en la sección "Artistas:",
+    // y se mapearán a la taxonomía "autor" en WordPress.
+    $artista = extraer_artistas($xpath);
 
     // ── Procesar taxonomías ──
     $taxData = $taxProcessor->processFromScraper([
         'tags'       => $tags,
-        'universo'   => $series,     // "Series:" → universo
+        'universo'   => $series,      // "Series:" → universo
         'idioma'     => $idioma,
-        'autor'      => $autor,
-        'tipo'       => $categorias, // "Categorías:" → tipo
-        'personajes' => $personajes, // "Personajes:" → personajes
+        'autor'      => $artista ?: $autor,  // "Artistas:" tiene prioridad, fallback a meta autor
+        'artista'    => $artista,            // Valor crudo por si se necesita
+        'tipo'       => $categorias,  // "Categorías:" → tipo
+        'personajes' => $personajes,  // "Personajes:" → personajes
     ]);
     $taxonomiasJson = json_encode($taxData, JSON_UNESCAPED_UNICODE);
 
     send_progress([
         'type'    => 'info',
         'message' => "🏷️  Título: {$titulo}  |  📖 Páginas: {$total_paginas}" .
-                     ($autor ? "  |  ✍️ Autor: {$autor}" : "") .
+                     ($artista ? "  |  ✍️ Artista: {$artista}" : ($autor ? "  |  ✍️ Autor: {$autor}" : "")) .
                      "  |  🏷️ Etiquetas: " . (count($taxData['etiquetas']) ? implode(', ', $taxData['etiquetas']) : 'ninguna')
     ]);
 
@@ -1472,6 +1496,14 @@ if ($action === 'batch') {
         $idioma        = extraer_idioma($xpath_comic, $html_comic);
         $rating        = extraer_rating($xpath_comic, $html_comic);
 
+        // ── Extraer Artistas (sección "Artistas:" del HTML) ──
+        $artista = extraer_artistas($xpath_comic);
+
+        // ── Forzar tipo "manga" cuando la fuente es 3hentai.net ──
+        if (defined('SITE_BASE') && stripos(SITE_BASE, '3hentai') !== false) {
+            $categorias = 'manga';
+        }
+
         // ── Procesar taxonomías: combinar universo de batch + series del HTML ──
         $universoCombinado = $universo; // universo base del batch (URL)
         if ($series !== null) {
@@ -1481,7 +1513,8 @@ if ($action === 'batch') {
             'tags'       => $tags,
             'universo'   => $universoCombinado,
             'idioma'     => $idioma,
-            'autor'      => $autor,
+            'autor'      => $artista ?: $autor,
+            'artista'    => $artista,
             'tipo'       => $categorias,
             'personajes' => $personajes,
         ]);
@@ -1490,7 +1523,7 @@ if ($action === 'batch') {
         send_progress([
             'type'    => 'info',
             'message' => "🏷️  «{$titulo}» — {$total_paginas} páginas" .
-                         ($autor ? "  |  ✍️ {$autor}" : "") .
+                         ($artista ? "  |  ✍️ Artista: {$artista}" : ($autor ? "  |  ✍️ {$autor}" : "")) .
                          "  |  🏷️ " . count($taxData['etiquetas']) . " etiquetas" .
                          "  |  🌐 " . ($taxData['idioma'] ?? '?')
         ]);
@@ -1598,7 +1631,7 @@ if ($action === 'batch') {
 
         // ── Guardar en BD ──
         $estado_final = ($paginas_fail === 0) ? 'completo' : (($paginas_ok > 0) ? 'parcial' : 'error');
-        registrar_comic($pdo, $id, $titulo, $universo, $autor, null, $tags, $sinopsis,
+        registrar_comic($pdo, $id, $titulo, $universo, $autor, $artista, $tags, $sinopsis,
                         $idioma, $rating, $total_paginas, $paginas_ok, $paginas_fail,
                         $estado_final, $dir_path, $taxonomiasJson);
 

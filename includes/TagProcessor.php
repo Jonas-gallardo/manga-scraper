@@ -56,11 +56,23 @@ class TagProcessor
     /**
      * @param float $fuzzyThreshold Umbral de similitud (default 0.75) para emparejar tags
      */
-    public function __construct(float $fuzzyThreshold = 0.75)
+    public function __construct(float $fuzzyThreshold = 0.82)
     {
         $this->existingTags = TaxonomyData::getTagsNormalized();
         $this->tagMappings = TaxonomyData::getTagMappingsNormalized();
         $this->fuzzyThreshold = $fuzzyThreshold;
+
+        // ── Cargar mappings personalizados desde data/custom_mappings.json ──
+        $customFile = __DIR__ . '/../data/custom_mappings.json';
+        if (file_exists($customFile)) {
+            $customData = json_decode(file_get_contents($customFile), true);
+            if (is_array($customData) && isset($customData['tags'])) {
+                foreach ($customData['tags'] as $original => $destino) {
+                    $key = TaxonomyData::normalizeForSearch($original);
+                    $this->tagMappings[$key] = mb_strtolower($destino, 'UTF-8');
+                }
+            }
+        }
         $this->unmappedLogFile = __DIR__ . '/../logs/unmapped_tags.log';
     }
 
@@ -93,6 +105,9 @@ class TagProcessor
         $processed = array_unique($processed);
 
         // 4. Cruzar con etiquetas existentes (normalizar contra la referencia)
+        //    SOLO se conservan las que tienen equivalencia en el diccionario o
+        //    en la lista de etiquetas existentes. Las que no tienen equivalencia
+        //    se IGNORAN (no se incluyen en el resultado final).
         $finalTags = [];
         foreach ($processed as $tag) {
             $matched = $this->matchExisting($tag);
@@ -100,10 +115,8 @@ class TagProcessor
                 // Usar la forma canónica (existente en WordPress)
                 $finalTags[] = $matched;
             } else {
-                // No encontrada en referencia → loguear como no mapeada
+                // No encontrada en referencia → loguear como no mapeada e IGNORAR
                 $this->logUnmappedTag($tag);
-                // Dejar la versión limpia como fallback
-                $finalTags[] = $tag;
             }
         }
 
@@ -213,29 +226,51 @@ class TagProcessor
     {
         $searchKey = TaxonomyData::normalizeForSearch($tag);
 
-        // ── 1. MAPA DE EQUIVALENCIAS (NUEVO) ──
-        // Consultar el diccionario de traducción tag_origen → tag_destino.
-        // Esto permite mapear etiquetas del sitio de scraping (inglés)
-        // a las etiquetas del sitio destino (español).
+        // ── 1. MAPA DE EQUIVALENCIAS ──
         if (isset($this->tagMappings[$searchKey])) {
             return $this->tagMappings[$searchKey];
         }
 
         // ── 2. Búsqueda exacta normalizada ──
         if (isset($this->existingTags[$searchKey])) {
-            // Devolver siempre en minúsculas (regla estricta #1)
             return mb_strtolower($this->existingTags[$searchKey], 'UTF-8');
         }
 
-        // ── 3. Búsqueda por similitud (fuzzy) ──
+        // ── 3. Intentar sin modificador entre paréntesis ──
+        // Tags de 3hentai como "anal (male)" o "blowjob (male)" llevan
+        // un modificador de género entre paréntesis. Si no hay match con
+        // el tag completo, extraemos la parte base y reintentamos.
+        $basePart = preg_replace('/\s*\([^)]+\)\s*$/', '', $searchKey);
+        $basePart = trim($basePart);
+        if ($basePart !== '' && $basePart !== $searchKey) {
+            // Reintentar con la base (sin modificador)
+            if (isset($this->tagMappings[$basePart])) {
+                return $this->tagMappings[$basePart];
+            }
+            if (isset($this->existingTags[$basePart])) {
+                return mb_strtolower($this->existingTags[$basePart], 'UTF-8');
+            }
+        }
+
+        // ── 4. Búsqueda por similitud (fuzzy) ──
+        // Strings de 1-2 caracteres NO deben hacer fuzzy match
+        if (strlen($searchKey) < 3) {
+            return null;
+        }
+
         $bestMatch = null;
         $bestScore = 0.0;
 
+        // Umbral dinámico: strings cortos necesitan más exactitud
+        $dynamicThreshold = $this->fuzzyThreshold;
+        if (strlen($searchKey) < 5) {
+            $dynamicThreshold = max($dynamicThreshold, 0.90);
+        }
+
         foreach ($this->existingTags as $existingKey => $existingValue) {
-            // Comparar con la versión normalizada de la existente
             $score = 0.0;
             similar_text($searchKey, $existingKey, $score);
-            $score /= 100.0; // similar_text devuelve porcentaje
+            $score /= 100.0;
 
             if ($score > $bestScore) {
                 $bestScore = $score;
@@ -243,8 +278,7 @@ class TagProcessor
             }
         }
 
-        if ($bestMatch !== null && $bestScore >= $this->fuzzyThreshold) {
-            // Devolver siempre en minúsculas
+        if ($bestMatch !== null && $bestScore >= $dynamicThreshold) {
             return mb_strtolower($bestMatch, 'UTF-8');
         }
 
@@ -300,6 +334,6 @@ class TagProcessor
      */
     public function getTagMappings(): array
     {
-        return TaxonomyData::getTagMappings();
+        return $this->tagMappings;
     }
 }

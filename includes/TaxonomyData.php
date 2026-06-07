@@ -626,6 +626,12 @@ class TaxonomyData
         'pet girl'              => 'Furro',
         'leash'                 => 'Bondage',
         'collar'                => 'Bondage',
+
+        // ── Mapeos específicos para 3hentai.net ──
+        // Tags con modificador de género que no tienen equivalente directo
+        // se resuelven mediante el step 3 de matchExisting() (sin modificador).
+        'anal (male)'              => 'Anal',
+        'anal intercourse (male)'  => 'Anal',
     ];
 
     /**

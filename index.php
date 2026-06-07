@@ -284,6 +284,16 @@
             border: 1px solid rgba(148, 163, 184, 0.15);
             font-size: 0.55rem;
         }
+        .tax-author {
+            background: rgba(244, 114, 182, 0.15);
+            color: #f9a8d4;
+            border: 1px solid rgba(244, 114, 182, 0.2);
+        }
+        .tax-character {
+            background: rgba(251, 191, 36, 0.15);
+            color: #fcd34d;
+            border: 1px solid rgba(251, 191, 36, 0.2);
+        }
 
         /* ── Comic Cards ── */
         .comic-card {
@@ -638,6 +648,9 @@
             <button class="nav-tab" data-tab="dashboard">
                 <span>📊</span> Dashboard
             </button>
+            <button class="nav-tab" data-tab="dictionary">
+                <span>📖</span> Diccionario
+            </button>
             <button id="btnOpenSettings" class="nav-tab" style="margin-left:auto">
                 <span>⚙️</span> Configuración
             </button>
@@ -890,6 +903,13 @@
                     <p class="text-gray-500 text-sm mt-3">Cargando estadísticas...</p>
                 </div>
             </div>
+        </div>
+
+        <!-- ════════════════════════════════════════════════════ -->
+        <!-- TAB 4: DICCIONARIO                                  -->
+        <!-- ════════════════════════════════════════════════════ -->
+        <div class="tab-content" id="tab-dictionary">
+            <iframe src="dictionary.php" class="w-full border-0" style="min-height:80vh;border-radius:0.75rem"></iframe>
         </div>
 
         <!-- ═══ FOOTER ═══ -->
@@ -1604,6 +1624,23 @@
                     let taxHtml = '';
                     if (comic.taxonomias) {
                         const tx = comic.taxonomias;
+                        // Autores / Artistas
+                        if (tx.autores && tx.autores.length > 0) {
+                            tx.autores.forEach(a => {
+                                taxHtml += `<span class="tax-badge tax-author" title="Autor">✍️ ${a}</span> `;
+                            });
+                        }
+                        // Personajes (máximo 3)
+                        if (tx.personajes && tx.personajes.length > 0) {
+                            const maxChars = 3;
+                            const showChars = tx.personajes.slice(0, maxChars);
+                            showChars.forEach(p => {
+                                taxHtml += `<span class="tax-badge tax-character" title="Personaje">👤 ${p}</span> `;
+                            });
+                            if (tx.personajes.length > maxChars) {
+                                taxHtml += `<span class="tax-badge tax-more" title="Ver más personajes">+${tx.personajes.length - maxChars}</span> `;
+                            }
+                        }
                         // Idioma
                         if (tx.idioma) {
                             taxHtml += `<span class="tax-badge tax-lang" title="Idioma">🌐 ${tx.idioma}</span> `;
@@ -1844,6 +1881,19 @@
                 });
             } else {
                 html += `<span class="tax-empty">No hay autores</span>`;
+            }
+            html += `</div></div>`;
+
+            // ── Personajes ──
+            html += `<div class="tax-section">
+                <div class="tax-section-title">👤 Personajes (${taxonomias && taxonomias.personajes ? taxonomias.personajes.length : 0})</div>
+                <div class="tax-items">`;
+            if (taxonomias && taxonomias.personajes && taxonomias.personajes.length > 0) {
+                taxonomias.personajes.forEach(p => {
+                    html += `<span class="tax-item tax-item-character">${p}</span>`;
+                });
+            } else {
+                html += `<span class="tax-empty">No hay personajes</span>`;
             }
             html += `</div></div>`;
 
