@@ -129,25 +129,132 @@ class DashboardController extends BaseController
                 ? round(($total_paginas_ok / $total_con_estado) * 100, 1)
                 : 0;
 
+            // ── Total descargados (paginas_ok > 0) ──
+            $total_descargados = (int) $pdo->query(
+                'SELECT COUNT(*) FROM comics_descargados WHERE paginas_ok > 0'
+            )->fetchColumn();
+
+            // ── Total tags ──
+            $total_tags = (int) $pdo->query(
+                'SELECT COUNT(DISTINCT TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(c.tags, ",", n.n), ",", -1))) as total
+                 FROM comics_descargados c
+                 CROSS JOIN (SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5) n
+                 WHERE CHAR_LENGTH(c.tags) - CHAR_LENGTH(REPLACE(c.tags, ",", "")) >= n.n - 1'
+            )->fetchColumn();
+            if ($total_tags === 0) {
+                $total_tags = $etiquetas_unicas;
+            }
+
+            // ── Taxonomies from DB ──
+            $taxonomias = [
+                'idiomas'    => array_keys($top_idiomas),
+                'universos'  => array_map(fn($u) => $u['universo'], $top_universos),
+                'tipos'      => [],
+                'autores'    => [],
+                'personajes' => [],
+                'tags'       => [],
+            ];
+
+            // Get tipos and autores from comics
+            // Types are stored in the taxonomias JSON column
+            $stmt_tax_tipos = $pdo->query(
+                'SELECT taxonomias FROM comics_descargados WHERE taxonomias IS NOT NULL LIMIT 200'
+            );
+            $tipo_set = [];
+            while ($row = $stmt_tax_tipos->fetch()) {
+                $tax = json_decode($row['taxonomias'], true);
+                if (!is_array($tax) || empty($tax['tipos'])) continue;
+                foreach ((array)$tax['tipos'] as $t) {
+                    $t = trim($t);
+                    if ($t !== '') $tipo_set[$t] = true;
+                }
+            }
+            $taxonomias['tipos'] = array_keys(array_slice($tipo_set, 0, 20));
+
+            $stmt_autores = $pdo->query(
+                'SELECT DISTINCT autor FROM comics_descargados WHERE autor IS NOT NULL AND autor != "" ORDER BY autor LIMIT 20'
+            );
+            $taxonomias['autores'] = $stmt_autores->fetchAll(\PDO::FETCH_COLUMN);
+
+            // Get unique tags from comics
+            if ($etiquetas_unicas > 0) {
+                $stmt_tags = $pdo->query(
+                    'SELECT tags FROM comics_descargados WHERE tags IS NOT NULL AND tags != "" LIMIT 100'
+                );
+                $all_tags = [];
+                while ($row = $stmt_tags->fetch()) {
+                    $parts = explode(',', $row['tags']);
+                    foreach ($parts as $t) {
+                        $t = trim($t);
+                        if ($t !== '') $all_tags[mb_strtolower($t)] = $t;
+                    }
+                }
+                $taxonomias['tags'] = array_values(array_slice($all_tags, 0, 30));
+            }
+
+            // ── System info ──
+            $system = [
+                'php_version'       => phpversion(),
+                'memory_limit'      => ini_get('memory_limit'),
+                'max_execution_time' => ini_get('max_execution_time') . 's',
+                'disk_free'         => $this->formatBytes(@disk_free_space(DOWNLOADS_DIR) ?: 0),
+                'disk_total'        => $this->formatBytes(@disk_total_space(DOWNLOADS_DIR) ?: 0),
+                'total_rows'        => $total_comics,
+            ];
+
+            // ── Format recientes ──
+            $recientes = [];
+            foreach ($ultimas_descargas as $r) {
+                $recientes[] = [
+                    'titulo'    => $r['titulo'] ?? '-',
+                    'universo'  => $r['universo'] ?? '-',
+                    'estado'    => $r['estado'] ?? '-',
+                    'fecha'     => $r['fecha_descarga'] ?? '-',
+                    'created_at' => $r['fecha_descarga'] ?? '-',
+                ];
+            }
+
+            // ── Format top_universos ──
+            $top_universos_formatted = [];
+            foreach ($top_universos as $u) {
+                $top_universos_formatted[] = [
+                    'universe' => $u['universo'],
+                    'count'    => (int) $u['total'],
+                ];
+            }
+
+            // ── Format top_idiomas ──
+            $top_idiomas_formatted = [];
+            foreach ($top_idiomas as $lang => $count) {
+                $top_idiomas_formatted[] = [
+                    'idioma' => $lang,
+                    'count'  => $count,
+                ];
+            }
+
             $this->json([
-                'success' => true,
-                'total_comics' => $total_comics,
-                'por_estado' => $por_estado,
-                'total_paginas_ok' => $total_paginas_ok,
+                'success'           => true,
+                'total_comics'      => $total_comics,
+                'total_descargados' => $total_descargados,
+                'total_universos'   => $total_universos,
+                'total_tags'        => $total_tags,
+                'estados'           => $por_estado,
+                'top_universos'     => $top_universos_formatted,
+                'taxonomias'        => $taxonomias,
+                'top_idiomas'       => $top_idiomas_formatted,
+                'recientes'         => $recientes,
+                'system'            => $system,
+                'total_paginas_ok'  => $total_paginas_ok,
                 'total_paginas_fail' => $total_paginas_fail,
-                'total_paginas' => $total_paginas,
+                'total_paginas'     => $total_paginas,
                 'tamano_total_bytes' => $tamano_total_bytes,
                 'tamano_formateado' => $this->formatBytes($tamano_total_bytes),
-                'total_universos' => $total_universos,
-                'ultimas_descargas' => $ultimas_descargas,
-                'top_universos' => $top_universos,
-                'dir_size' => $dir_size,
+                'dir_size'          => $dir_size,
                 'dir_size_formateado' => $this->formatBytes($dir_size),
-                'dir_file_count' => $dir_count,
-                'top_idiomas' => $top_idiomas,
-                'etiquetas_unicas' => $etiquetas_unicas,
+                'dir_file_count'    => $dir_count,
+                'etiquetas_unicas'  => $etiquetas_unicas,
                 'actividad_reciente' => $actividad_reciente,
-                'tasa_exito' => $tasa_exito,
+                'tasa_exito'        => $tasa_exito,
             ]);
         } catch (\Exception $e) {
             $this->json([

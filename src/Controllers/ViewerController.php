@@ -49,7 +49,11 @@ class ViewerController extends BaseController
             $this->serveLegacyFile($_GET['file']);
         } else {
             http_response_code(400);
-            echo 'Parámetros insuficientes. Use ?comic_id=ID o ?file=path';
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'success' => false,
+                'message' => 'Parámetros insuficientes. Use ?comic_id=ID o ?file=path',
+            ]);
             exit;
         }
     }
@@ -131,8 +135,9 @@ class ViewerController extends BaseController
         echo json_encode([
             'success' => true,
             'comic'   => $result['comic'],
-            'paginas' => $paginas,
+            'pages'   => $paginas,
             'total'   => count($paginas),
+            'titulo'  => $result['comic']['titulo'] ?? 'Visor',
         ], JSON_UNESCAPED_UNICODE);
         exit;
     }
@@ -147,14 +152,16 @@ class ViewerController extends BaseController
 
         if ($realPath === false || strpos($realPath, $downloadsReal) !== 0) {
             header('HTTP/1.0 403 Forbidden');
-            echo 'Acceso denegado';
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'Acceso denegado']);
             exit;
         }
 
         $ext = strtolower(pathinfo($realPath, PATHINFO_EXTENSION));
         if (!in_array($ext, $this->allowedExts) || !is_file($realPath)) {
             header('HTTP/1.0 404 Not Found');
-            echo 'Archivo no encontrado';
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'Archivo no encontrado']);
             exit;
         }
 

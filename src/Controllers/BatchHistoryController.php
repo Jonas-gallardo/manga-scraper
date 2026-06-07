@@ -75,7 +75,7 @@ class BatchHistoryController extends BaseController
 
             $this->json([
                 'success'     => true,
-                'records'     => $records,
+                'data'        => $records,
                 'total'       => $total,
                 'page'        => $page,
                 'per_page'    => $per_page,

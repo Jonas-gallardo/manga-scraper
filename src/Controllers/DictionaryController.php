@@ -26,6 +26,14 @@ class DictionaryController extends BaseController
     }
 
     /**
+     * Alias for handle() — called by dictionary.php wrapper.
+     */
+    public function index(): void
+    {
+        $this->handle();
+    }
+
+    /**
      * Handle all dictionary requests.
      * POST → AJAX handler
      * GET  → HTML page render

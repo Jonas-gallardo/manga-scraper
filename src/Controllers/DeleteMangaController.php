@@ -21,7 +21,9 @@ class DeleteMangaController extends BaseController
     {
         $this->requirePost();
 
-        $id_fuente = (int) $this->postParam('id_fuente', 0);
+        // Accept both 'id_fuente' (PHP-style) and 'comic_id' (JS-style)
+        // from JSON body (sent by JS fetch) or POST form data
+        $id_fuente = (int) ($this->jsonBody('id_fuente') ?: $this->jsonBody('comic_id') ?: $this->postParam('id_fuente') ?: $this->postParam('comic_id', 0));
         $motivo    = trim($this->postParam('motivo', 'Eliminado por usuario'));
 
         if ($id_fuente <= 0) {

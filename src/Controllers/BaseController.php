@@ -47,6 +47,11 @@ abstract class BaseController
      */
     protected function json(mixed $data, int $status = 200): void
     {
+        // Clean any previous output (PHP warnings, whitespace, etc.)
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+
         http_response_code($status);
         header('Content-Type: application/json; charset=utf-8');
         header('Cache-Control: no-cache');
@@ -89,6 +94,23 @@ abstract class BaseController
     protected function postParam(string $key, mixed $default = null): mixed
     {
         return $_POST[$key] ?? $default;
+    }
+
+    /**
+     * Get a JSON body parameter (for requests with Content-Type: application/json).
+     * Parses the raw request body as JSON and returns the specified key or the full object.
+     */
+    protected function jsonBody(?string $key = null, mixed $default = null): mixed
+    {
+        static $body = null;
+        if ($body === null) {
+            $raw = file_get_contents('php://input');
+            $body = $raw ? json_decode($raw, true) : [];
+        }
+        if ($key === null) {
+            return $body ?: $default;
+        }
+        return $body[$key] ?? $default;
     }
 
     /**

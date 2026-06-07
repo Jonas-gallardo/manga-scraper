@@ -161,7 +161,7 @@ class GalleryController extends BaseController
 
             $this->json([
                 'success'         => true,
-                'comics'          => $comics,
+                'data'            => $comics,
                 'total'           => $total,
                 'page'            => $page,
                 'per_page'        => $per_page,

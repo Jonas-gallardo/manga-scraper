@@ -387,23 +387,34 @@
     if (searchInput && searchInput.value.trim()) filters.search = searchInput.value.trim();
 
     const universeFilter = document.getElementById('filterUniverse');
-    if (universeFilter && universeFilter.value) filters.universe = universeFilter.value;
+    if (universeFilter && universeFilter.value) filters.universo = universeFilter.value;
 
     const estadoFilter = document.getElementById('filterEstado');
     if (estadoFilter && estadoFilter.value) filters.estado = estadoFilter.value;
 
     const dateFrom = document.getElementById('filterDateFrom');
-    if (dateFrom && dateFrom.value) filters.date_from = dateFrom.value;
+    if (dateFrom && dateFrom.value) filters.fecha_desde = dateFrom.value;
 
     const dateTo = document.getElementById('filterDateTo');
-    if (dateTo && dateTo.value) filters.date_to = dateTo.value;
+    if (dateTo && dateTo.value) filters.fecha_hasta = dateTo.value;
 
     const sortSelect = document.getElementById('filterSort');
-    if (sortSelect && sortSelect.value) filters.sort = sortSelect.value;
+    if (sortSelect && sortSelect.value) {
+      const parts = sortSelect.value.split(',');
+      filters.sort = parts[0];
+      if (parts[1]) filters.order = parts[1];
+    }
 
     try {
       const data = await ScrapAPI.fetchGallery(filters);
       galleryLoading.classList.add('hidden');
+
+      // Update total counter badge
+      const totalBadge = document.getElementById('galleryTotalBadge');
+      if (totalBadge) {
+        const total = data.total || 0;
+        totalBadge.textContent = total + ' cómic' + (total !== 1 ? 's' : '');
+      }
 
       const comics = data.data || [];
 
@@ -421,7 +432,7 @@
         const tipo = comic.tipo || '';
         const idioma = comic.idioma || '';
         const estado = comic.estado || 'desconocido';
-        const id = comic.id || '';
+        const id = comic.id_fuente || '';
 
         let badgesHTML = '';
         if (comic.universo) {
@@ -448,8 +459,9 @@
         const estadoClass = (estado || '').toLowerCase().replace(/\s+/g, '');
         const estadoDot = `<span class="status-dot ${estadoClass}" title="${estado}"></span>`;
 
+        const comicData = encodeURIComponent(JSON.stringify(comic));
         card.innerHTML = `
-          <div class="comic-cover">
+          <div class="comic-cover" data-id="${id}">
             ${coverUrl ? `<img src="${coverUrl}" alt="${title}" loading="lazy" />` : `<span style="color:#475569;font-size:2rem;">📖</span>`}
           </div>
           <div class="comic-info">
@@ -459,7 +471,7 @@
             </div>
             <div class="text-xs" style="display:flex;flex-wrap:wrap;gap:3px;">${badgesHTML}</div>
             <div style="display:flex;gap:6px;margin-top:4px;">
-              <button class="btn-ghost text-xs btn-view" data-id="${id}" style="flex:1;padding:4px 8px;">Ver</button>
+              <button class="btn-ghost text-xs btn-tax" data-comic="${comicData}" style="flex:1;padding:4px 8px;">Taxonomía</button>
               <button class="btn-ghost text-xs btn-delete-comic" data-id="${id}" style="flex:1;padding:4px 8px;color:#f87171;">Eliminar</button>
             </div>
           </div>
@@ -474,10 +486,22 @@
       }
 
       // Attach event listeners via delegation
-      galleryGrid.querySelectorAll('.btn-view').forEach(btn => {
+      galleryGrid.querySelectorAll('.comic-cover').forEach(el => {
+        el.addEventListener('click', function(e) {
+          const id = this.dataset.id;
+          if (id) abrirVisor(id);
+        });
+      });
+
+      galleryGrid.querySelectorAll('.btn-tax').forEach(btn => {
         btn.addEventListener('click', function(e) {
           e.stopPropagation();
-          abrirVisor(this.dataset.id);
+          try {
+            const comic = JSON.parse(decodeURIComponent(this.dataset.comic));
+            abrirModalTaxonomias(comic);
+          } catch (err) {
+            appendToLog('Error al cargar taxonomías', 'error');
+          }
         });
       });
 

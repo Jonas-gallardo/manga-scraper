@@ -14,7 +14,10 @@ const ScrapAPI = (function() {
   // ── Base fetch wrapper ─────────────────────────────────────
   async function request(url, options = {}) {
     const defaults = {
-      headers: { 'Accept': 'application/json' },
+      headers: {
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
     };
     // Don't set Content-Type for FormData (let browser set it)
     if (options.body && !(options.body instanceof FormData)) {
@@ -23,6 +26,23 @@ const ScrapAPI = (function() {
     const merged = { ...defaults, ...options };
     const response = await fetch(url, merged);
     return response;
+  }
+
+  /**
+   * Safely parse a JSON response, handling errors gracefully.
+   * Falls back to text if the response is not valid JSON.
+   */
+  async function parseJSON(response) {
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`HTTP ${response.status}: ${response.statusText}${text ? ' — ' + text.slice(0, 200) : ''}`);
+    }
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json') && !contentType.includes('application/problem+json')) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`Respuesta inesperada (${contentType || 'vacía'})${text ? ': ' + text.slice(0, 200) : ''}`);
+    }
+    return response.json();
   }
 
   // ── Scraper (streaming via ReadableStream) ──────────────────
@@ -96,21 +116,25 @@ const ScrapAPI = (function() {
   async function fetchBatchHistory(page = 1, search = '') {
     const params = new URLSearchParams({ page, search });
     const resp = await request(`batch_history.php?${params}`);
-    return resp.json();
+    return parseJSON(resp);
   }
 
   // ── Gallery ────────────────────────────────────────────────
   async function fetchGallery(filters = {}) {
     const params = new URLSearchParams(filters);
     const resp = await request(`gallery.php?${params}`);
-    return resp.json();
+    return parseJSON(resp);
   }
 
   // ── Viewer ─────────────────────────────────────────────────
-  async function fetchViewer(comicId, page = 1) {
-    const params = new URLSearchParams({ comic_id: comicId, page });
+  async function fetchViewer(comicId, page) {
+    const params = new URLSearchParams({ comic_id: comicId });
+    // Only add page when explicitly requested (for image serving, not JSON listing)
+    if (page !== undefined && page !== null) {
+      params.set('page', page);
+    }
     const resp = await request(`viewer.php?${params}`);
-    return resp.json();
+    return parseJSON(resp);
   }
 
   // ── Delete Manga ───────────────────────────────────────────
@@ -119,19 +143,19 @@ const ScrapAPI = (function() {
       method: 'POST',
       body: JSON.stringify({ comic_id: comicId }),
     });
-    return resp.json();
+    return parseJSON(resp);
   }
 
   // ── Dashboard ──────────────────────────────────────────────
   async function fetchDashboard() {
     const resp = await request('dashboard.php');
-    return resp.json();
+    return parseJSON(resp);
   }
 
   // ── Settings ───────────────────────────────────────────────
   async function fetchConfig() {
     const resp = await request('save_config.php');
-    return resp.json();
+    return parseJSON(resp);
   }
 
   async function saveConfig(data) {
@@ -139,7 +163,7 @@ const ScrapAPI = (function() {
       method: 'POST',
       body: JSON.stringify(data),
     });
-    return resp.json();
+    return parseJSON(resp);
   }
 
   // ── Public API ────────────────────────────────────────────

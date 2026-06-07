@@ -57,6 +57,9 @@ class ErrorHandler
         set_exception_handler([self::class, 'handleException']);
         set_error_handler([self::class, 'handleError']);
 
+        // Suppress direct error output to prevent corrupting JSON responses
+        ini_set('display_errors', '0');
+
         self::$registered = true;
     }
 

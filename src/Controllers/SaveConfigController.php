@@ -37,36 +37,37 @@ class SaveConfigController extends BaseController
             if (isset($config['db_pass']) && $config['db_pass'] !== '') {
                 $config['db_pass_hint'] = '••••••••';
             }
-            $this->json([
+            // Merge config fields to top level so JS can access them directly
+            $this->json(array_merge([
                 'success'     => true,
                 'configurado' => true,
-                'config'      => $config,
-            ]);
+            ], $config));
         } else {
-            $this->json([
+            $defaults = $this->getDefaultConfig();
+            $this->json(array_merge([
                 'success'     => true,
                 'configurado' => false,
-                'config'      => $this->getDefaultConfig(),
-            ]);
+            ], $defaults));
         }
     }
 
     /**
      * POST: Save and test new configuration.
      * Also runs database migration (creates tables if they don't exist).
+     * Supports both JSON body (from JS fetch) and form-data.
      */
     public function save(): void
     {
         $this->requirePost();
 
-        $db_host        = trim($this->postParam('db_host', 'localhost'));
-        $db_name        = trim($this->postParam('db_name', 'comics_db'));
-        $db_user        = trim($this->postParam('db_user', 'root'));
-        $db_pass        = (string) $this->postParam('db_pass', '');
-        $site_url       = trim($this->postParam('site_base_url', 'https://sitio.com'));
-        $site_view_path = '/' . ltrim(trim($this->postParam('site_view_path', '/view')), '/');
-        $site_batch_path = '/' . ltrim(trim($this->postParam('site_batch_path', '/parody')), '/');
-        $download_path  = trim($this->postParam('download_path', ''));
+        $db_host        = trim($this->jsonBody('db_host', $this->postParam('db_host', 'localhost')));
+        $db_name        = trim($this->jsonBody('db_name', $this->postParam('db_name', 'comics_db')));
+        $db_user        = trim($this->jsonBody('db_user', $this->postParam('db_user', 'root')));
+        $db_pass        = (string) ($this->jsonBody('db_pass', $this->postParam('db_pass', '')));
+        $site_url       = trim($this->jsonBody('site_base_url', $this->postParam('site_base_url', 'https://sitio.com')));
+        $site_view_path = '/' . ltrim(trim($this->jsonBody('site_view_path', $this->postParam('site_view_path', '/view'))), '/');
+        $site_batch_path = '/' . ltrim(trim($this->jsonBody('site_batch_path', $this->postParam('site_batch_path', '/parody'))), '/');
+        $download_path  = trim($this->jsonBody('download_path', $this->postParam('download_path', '')));
 
         // Validate site URL
         if (!preg_match('#^https?://[^/]+#', $site_url)) {
@@ -137,12 +138,12 @@ class SaveConfigController extends BaseController
             'site_parody'     => $site_parody,
             'site_domain'     => $site_domain,
             'download_path'   => $download_path !== '' ? $download_path : (__DIR__ . '/../../descargas'),
-            'curl_ssl_verify' => (bool) $this->postParam('curl_ssl_verify', false),
-            'delay_page_min'  => (float) $this->postParam('delay_page_min', 1.5),
-            'delay_page_max'  => (float) $this->postParam('delay_page_max', 3.5),
-            'delay_comic_min' => (int) $this->postParam('delay_comic_min', 5),
-            'delay_comic_max' => (int) $this->postParam('delay_comic_max', 10),
-            'max_retries'     => (int) $this->postParam('max_retries', 2),
+            'curl_ssl_verify' => (bool) ($this->jsonBody('curl_ssl_verify', $this->postParam('curl_ssl_verify', false))),
+            'delay_page_min'  => (float) ($this->jsonBody('delay_page_min', $this->postParam('delay_page_min', 1.5))),
+            'delay_page_max'  => (float) ($this->jsonBody('delay_page_max', $this->postParam('delay_page_max', 3.5))),
+            'delay_comic_min' => (int) ($this->jsonBody('delay_comic_min', $this->postParam('delay_comic_min', 5))),
+            'delay_comic_max' => (int) ($this->jsonBody('delay_comic_max', $this->postParam('delay_comic_max', 10))),
+            'max_retries'     => (int) ($this->jsonBody('max_retries', $this->postParam('max_retries', 2))),
             'saved_at'        => date('Y-m-d H:i:s'),
         ];
 

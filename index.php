@@ -61,6 +61,10 @@
     @media (min-width: 768px) {
       .md\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .md\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .md\:grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    }
+    @media (min-width: 1024px) {
+      .lg\:grid-cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -204,6 +208,15 @@
     <!-- TAB: Gallery -->
     <!-- ════════════════════════════════════════════════════════════ -->
     <div id="tab-gallery" class="tab-content">
+      <!-- Gallery Header with Total Counter -->
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-sm font-semibold text-slate-300 uppercase tracking-wide">
+          🖼️ Galería
+          <span id="galleryTotalBadge" class="ml-2 text-xs font-normal text-slate-500 bg-slate-700/50 px-2 py-0.5 rounded-full">0 cómics</span>
+        </h3>
+      </div>
+
+      <!-- Filters -->
       <div class="glass-strong p-4 mb-6">
         <div class="flex flex-wrap items-end gap-3 mb-4">
           <div class="flex-1" style="min-width:160px;">
@@ -236,17 +249,17 @@
           <div style="min-width:110px;">
             <label class="text-xs text-slate-500 font-semibold uppercase tracking-wide mb-1 block">Ordenar</label>
             <select id="filterSort" class="glass-input" style="padding:6px 10px;font-size:.78rem;">
-              <option value="fecha_desc">Más reciente</option>
-              <option value="fecha_asc">Más antiguo</option>
-              <option value="titulo_asc">Título A-Z</option>
-              <option value="titulo_desc">Título Z-A</option>
+              <option value="fecha_descarga,DESC">Más reciente</option>
+              <option value="fecha_descarga,ASC">Más antiguo</option>
+              <option value="titulo,ASC">Título A-Z</option>
+              <option value="titulo,DESC">Título Z-A</option>
             </select>
           </div>
         </div>
       </div>
 
       <!-- Gallery Grid -->
-      <div id="galleryGrid" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+      <div id="galleryGrid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-3" style="max-width:1400px;margin:0 auto;"></div>
 
       <!-- Loading -->
       <div id="galleryLoading" class="hidden text-center py-8">
