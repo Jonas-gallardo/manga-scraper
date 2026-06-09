@@ -651,6 +651,9 @@
             <button class="nav-tab" data-tab="dictionary">
                 <span>📖</span> Diccionario
             </button>
+            <button class="nav-tab" data-tab="wpublish">
+                <span>🚀</span> WP Publisher
+            </button>
             <button id="btnOpenSettings" class="nav-tab" style="margin-left:auto">
                 <span>⚙️</span> Configuración
             </button>
@@ -912,6 +915,13 @@
             <iframe src="dictionary.php" class="w-full border-0" style="min-height:80vh;border-radius:0.75rem"></iframe>
         </div>
 
+        <!-- ════════════════════════════════════════════════════ -->
+        <!-- TAB 5: WP PUBLISHER                                -->
+        <!-- ════════════════════════════════════════════════════ -->
+        <div class="tab-content" id="tab-wpublish">
+            <iframe src="publish_to_wp.php" class="w-full border-0" style="min-height:85vh;border-radius:0.75rem"></iframe>
+        </div>
+
         <!-- ═══ FOOTER ═══ -->
         <div class="text-center mt-10 pt-6 border-t border-gray-800/50">
             <p class="text-xs text-gray-600">
@@ -1056,6 +1066,33 @@
                     <div class="mt-3">
                         <label class="block text-xs text-gray-500 mb-1">Reintentos máximos</label>
                         <input type="number" id="cfg_retries" class="glass-input w-full px-3 py-2 text-sm" value="3" min="0" max="10">
+                    </div>
+                </div>
+
+                <div class="section-divider"></div>
+
+                <!-- WordPress -->
+                <div>
+                    <div class="flex items-center gap-2 mb-3">
+                        <span class="text-sm">🚀</span>
+                        <h3 class="text-sm font-semibold text-indigo-400">WordPress — Publicación Automática</h3>
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-500 mb-1">URL del Sitio WordPress</label>
+                        <input type="url" id="cfg_wp_url" class="glass-input w-full px-3 py-2 text-sm" value="http://localhost:10003" placeholder="http://localhost:10003">
+                        <p class="text-xs text-gray-600 mt-1">URL base de tu instalación WordPress (con puerto si aplica)</p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3 mt-3">
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Usuario</label>
+                            <input type="text" id="cfg_wp_user" class="glass-input w-full px-3 py-2 text-sm" value="admin">
+                            <p class="text-xs text-gray-600 mt-1">Usuario con Application Password generado</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">Application Password</label>
+                            <input type="password" id="cfg_wp_pass" class="glass-input w-full px-3 py-2 text-sm" placeholder="(requerido)">
+                            <p class="text-xs text-gray-600 mt-1">Generar en: Usuarios → Perfil → Application Passwords</p>
+                        </div>
                     </div>
                 </div>
 
@@ -2269,6 +2306,11 @@
                     document.getElementById('cfg_delay_c_min').value = c.delay_comic_min || 5;
                     document.getElementById('cfg_delay_c_max').value = c.delay_comic_max || 10;
                     document.getElementById('cfg_retries').value = c.max_retries || 3;
+                    document.getElementById('cfg_wp_url').value = c.wp_base_url || 'http://localhost:10003';
+                    document.getElementById('cfg_wp_user').value = c.wp_username || 'admin';
+                    if (c.wp_app_password_hint) {
+                        document.getElementById('cfg_wp_pass').placeholder = c.wp_app_password_hint;
+                    }
                     if (c.db_pass_hint) {
                         document.getElementById('cfg_db_pass').placeholder = c.db_pass_hint;
                     }
@@ -2302,6 +2344,9 @@
             formData.append('delay_comic_min', document.getElementById('cfg_delay_c_min').value);
             formData.append('delay_comic_max', document.getElementById('cfg_delay_c_max').value);
             formData.append('max_retries', document.getElementById('cfg_retries').value);
+            formData.append('wp_base_url', document.getElementById('cfg_wp_url').value);
+            formData.append('wp_username', document.getElementById('cfg_wp_user').value);
+            formData.append('wp_app_password', document.getElementById('cfg_wp_pass').value);
 
             try {
                 const res = await fetch('save_config.php', { method: 'POST', body: formData });

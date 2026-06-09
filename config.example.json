@@ -16,5 +16,8 @@
     "delay_comic_max": 10,
     "max_retries": 2,
     "curl_ssl_verify": false,
+    "wp_base_url": "http://localhost:10003",
+    "wp_username": "admin",
+    "wp_app_password": "",
     "saved_at": ""
 }

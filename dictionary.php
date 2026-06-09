@@ -492,7 +492,7 @@ foreach ($mergedUniverses as $univ) {
                         <div>
                             <label class="block text-xs text-slate-500 mb-1">Tag destino (WordPress)</label>
                             <input type="text" name="destino" required
-                                   class="search-input" placeholder="ej: Tetona">
+                                   class="search-input" placeholder="ej: tetona">
                         </div>
                         <div class="flex items-end gap-2">
                             <button type="submit" class="btn-primary">Guardar</button>

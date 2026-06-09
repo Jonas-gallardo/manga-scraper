@@ -14,9 +14,12 @@ $config_file = __DIR__ . '/config.json';
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     if (file_exists($config_file)) {
         $config = json_decode(file_get_contents($config_file), true);
-        // No mostrar la contraseña completa por seguridad
+        // No mostrar contraseñas completas por seguridad
         if (isset($config['db_pass']) && $config['db_pass'] !== '') {
             $config['db_pass_hint'] = '••••••••';
+        }
+        if (isset($config['wp_app_password']) && $config['wp_app_password'] !== '') {
+            $config['wp_app_password_hint'] = '••••••••';
         }
         echo json_encode([
             'success' => true,
@@ -44,6 +47,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
                 'delay_comic_max' => 10,
                 'max_retries' => 2,
                 'curl_ssl_verify' => false,
+                'wp_base_url' => 'http://localhost:10003',
+                'wp_username' => 'admin',
+                'wp_app_password' => '',
             ]
         ], JSON_UNESCAPED_UNICODE);
     }
@@ -57,6 +63,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $db_user   = trim($_POST['db_user'] ?? 'root');
     $db_pass       = $_POST['db_pass'] ?? '';
     $site_url        = trim($_POST['site_base_url'] ?? 'https://sitio.com');
+    $wp_base_url    = rtrim(trim($_POST['wp_base_url'] ?? 'http://localhost:10003'), '/');
+    $wp_username    = trim($_POST['wp_username'] ?? 'admin');
+    $wp_app_password = $_POST['wp_app_password'] ?? '';
     $site_view_path  = '/' . ltrim(trim($_POST['site_view_path'] ?? '/view'), '/');
     $site_batch_path = '/' . ltrim(trim($_POST['site_batch_path'] ?? '/parody'), '/');
     $download_path   = trim($_POST['download_path'] ?? '');
@@ -67,11 +76,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // Si ya existe config, mantener la contraseña anterior si no se envió una nueva
-    if ($db_pass === '' && file_exists($config_file)) {
+    // Si ya existe config, mantener contraseñas anteriores si no se enviaron nuevas
+    if (file_exists($config_file)) {
         $existing = json_decode(file_get_contents($config_file), true);
-        if (isset($existing['db_pass']) && $existing['db_pass'] !== '') {
+        if ($db_pass === '' && isset($existing['db_pass']) && $existing['db_pass'] !== '') {
             $db_pass = $existing['db_pass'];
+        }
+        if ($wp_app_password === '' && isset($existing['wp_app_password']) && $existing['wp_app_password'] !== '') {
+            $wp_app_password = $existing['wp_app_password'];
         }
     }
 
@@ -134,6 +146,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         'delay_comic_min' => (int) ($_POST['delay_comic_min'] ?? 5),
         'delay_comic_max' => (int) ($_POST['delay_comic_max'] ?? 10),
         'max_retries'     => (int) ($_POST['max_retries'] ?? 2),
+        'wp_base_url'     => $wp_base_url,
+        'wp_username'     => $wp_username,
+        'wp_app_password' => $wp_app_password,
         'saved_at'        => date('Y-m-d H:i:s'),
     ];
 

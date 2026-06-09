@@ -74,8 +74,11 @@ define('LOG_DIR', __DIR__ . '/logs');
 define('LOG_FILE', LOG_DIR . '/scraper.log');
 define('LOG_MAX_SIZE', 5 * 1024 * 1024);
 
-// ── Stop Signal (usado por el botón Detener) ──
+// ── Stop Signal (usado por el botón Detener del scraper) ──
 define('SCRAPER_STOP_FILE', sys_get_temp_dir() . '/scraper_stop.flag');
+
+// ── Stop Signal para WP Publisher ──
+define('PUBLISH_STOP_FILE', sys_get_temp_dir() . '/publish_stop.flag');
 
 /**
  * Escanea un directorio y devuelve imágenes ordenadas.
