@@ -41,6 +41,9 @@ class WPPublisher
     /** @var bool Si es true, omite subir imágenes (solo publica) */
     private bool $skipImageUpload;
 
+    /** @var array<string, mixed> Estado actual del progreso (para polling UI) */
+    private array $currentProgress;
+
     /**
      * @param WPClient        $client
      * @param WPTaxonomySync  $taxonomySync
@@ -66,15 +69,141 @@ class WPPublisher
             'images_failed'    => 0,
             'details'          => [],
         ];
+        $this->currentProgress = [
+            'status'          => 'idle',
+            'current_comic'   => null,
+            'stats'           => $this->stats,
+            'log'             => [],
+            'timestamp'       => time(),
+        ];
+    }
+
+    /**
+     * Inicializa el archivo de progreso para polling desde la UI.
+     */
+    private function initProgressFile(string $status = 'publishing'): void
+    {
+        $this->currentProgress = [
+            'status'        => $status,
+            'current_comic' => null,
+            'stats'         => $this->stats,
+            'log'           => [],
+            'timestamp'     => time(),
+        ];
+        $this->writeProgressFile();
+    }
+
+    /**
+     * Escribe el estado actual al archivo de progreso (para polling JS).
+     */
+    private function writeProgressFile(): void
+    {
+        $this->currentProgress['timestamp'] = time();
+        $this->currentProgress['stats'] = $this->getStats();
+        $json = json_encode($this->currentProgress, JSON_UNESCAPED_UNICODE);
+        if (defined('PUBLISH_PROGRESS_FILE')) {
+            @file_put_contents(PUBLISH_PROGRESS_FILE, $json, LOCK_EX);
+        }
+    }
+
+    /**
+     * Añade un mensaje al log del progreso actual.
+     */
+    private function addProgressLog(string $message, string $type = 'info'): void
+    {
+        $this->currentProgress['log'][] = [
+            'time' => date('H:i:s'),
+            'msg'  => $message,
+            'type' => $type,
+        ];
+        // Mantener solo últimos 200 mensajes
+        if (count($this->currentProgress['log']) > 200) {
+            array_shift($this->currentProgress['log']);
+        }
+        $this->writeProgressFile();
+        // También al archivo de log tradicional
+        $this->log("[{$type}] {$message}");
+    }
+
+    /**
+     * Actualiza el cómic actual en el progreso.
+     */
+    private function setCurrentComic(int $comicId, string $titulo, int $totalPages = 0): void
+    {
+        $this->currentProgress['current_comic'] = [
+            'id'             => $comicId,
+            'title'          => $titulo,
+            'total_pages'    => $totalPages,
+            'uploaded_pages' => 0,
+            'current_page'   => 0,
+        ];
+        $this->writeProgressFile();
+    }
+
+    /**
+     * Actualiza el progreso de páginas del cómic actual.
+     */
+    private function updateCurrentPageProgress(int $pageNum, int $totalPages): void
+    {
+        if ($this->currentProgress['current_comic'] !== null) {
+            $this->currentProgress['current_comic']['uploaded_pages'] = $pageNum;
+            $this->currentProgress['current_comic']['current_page'] = $pageNum;
+            $this->currentProgress['current_comic']['total_pages'] = $totalPages;
+            $this->writeProgressFile();
+        }
+    }
+
+    /**
+     * Marca el progreso como completado exitosamente.
+     */
+    private function markProgressSuccess(string $message = 'Completado'): void
+    {
+        $this->currentProgress['status'] = 'completed';
+        $this->addProgressLog("✅ {$message}", 'success');
+        $this->writeProgressFile();
+        $this->cleanProgressFileAfterDelay();
+    }
+
+    /**
+     * Marca el progreso como detenido.
+     */
+    private function markProgressStopped(string $message = 'Detenido por el usuario'): void
+    {
+        $this->currentProgress['status'] = 'stopped';
+        $this->addProgressLog("⏹ {$message}", 'warning');
+        $this->writeProgressFile();
+        $this->cleanProgressFileAfterDelay();
+    }
+
+    /**
+     * Marca el progreso con error.
+     */
+    private function markProgressError(string $message): void
+    {
+        $this->currentProgress['status'] = 'error';
+        $this->addProgressLog("❌ {$message}", 'error');
+        $this->writeProgressFile();
+        $this->cleanProgressFileAfterDelay();
+    }
+
+    /**
+     * Limpia el archivo de progreso después de un breve retardo
+     * para que la UI tenga tiempo de leer el estado final.
+     */
+    private function cleanProgressFileAfterDelay(): void
+    {
+        // No eliminar inmediatamente — la UI necesita leer el estado final
+        // Se eliminará cuando se inicie una nueva operación
     }
 
     /**
      * Publica un cómic individual en WordPress.
      *
      * @param int $comicId ID del cómic en la BD local (id_fuente)
+     * @param callable|null $pageProgressCallback fn(int $pageNum, int $totalPages, string $titulo) => void
      * @return array<string, mixed> Resultado de la operación
      */
-    public function publishComic(int $comicId): array
+    public function publishComic(int $comicId, ?callable $pageProgressCallback = null): array
     {
         $this->stats['total_comics']++;
 
@@ -82,6 +211,7 @@ class WPPublisher
         $comic = $this->loadComicData($comicId);
         if ($comic === null) {
             $this->stats['errors']++;
+            $this->addProgressLog("❌ Cómic ID {$comicId} no encontrado en BD", 'error');
             return [
                 'success' => false,
                 'comic_id' => $comicId,
@@ -89,9 +219,15 @@ class WPPublisher
             ];
         }
 
+        $titulo      = $comic['titulo'];
+        $rutaCarpeta = $comic['ruta_carpeta'];
+        $taxData     = $comic['taxonomias_parsed'];
+        $totalPaginas = (int) ($comic['total_paginas'] ?? 0);
+
         // ── 2. Verificar si ya fue publicado ──
         if (!empty($comic['wp_post_id'])) {
             $this->stats['skipped']++;
+            $this->addProgressLog("⏭ «{$titulo}» ya publicado (WP Post ID: {$comic['wp_post_id']})", 'warning');
             return [
                 'success' => true,
                 'comic_id' => $comicId,
@@ -101,88 +237,138 @@ class WPPublisher
             ];
         }
 
-        $titulo      = $comic['titulo'];
-        $rutaCarpeta = $comic['ruta_carpeta'];
-        $taxData     = $comic['taxonomias_parsed'];
+        // ── 3. Marcar como "publicando" en BD ──
+        $this->updatePublishStatus($comicId, 'publishing');
+        $this->setCurrentComic($comicId, $titulo, $totalPaginas);
+        $this->addProgressLog("▶️ Publicando «{$titulo}» (ID {$comicId})...", 'info');
 
-        $this->log("Iniciando publicación de «{$titulo}» (ID {$comicId})");
-
-        // ── 3. PASO A: Subir imágenes ──
+        // ── 4. PASO A: Subir imágenes ──
         $mediaIds = [];
         if (!$this->skipImageUpload && $rutaCarpeta && is_dir($rutaCarpeta)) {
-            $this->log(" PASO A: Subiendo imágenes desde {$rutaCarpeta}");
-            $mediaIds = $this->uploadComicImages($comicId, $titulo, $rutaCarpeta);
+            // Escanear imágenes para saber total real
+            $allImages = $this->scanWebpImages($rutaCarpeta);
+            $realTotal = count($allImages);
+            $this->setCurrentComic($comicId, $titulo, $realTotal);
+            $this->addProgressLog("📤 PASO A: Subiendo {$realTotal} imágenes...", 'info');
+
+            $mediaIds = $this->uploadComicImages($comicId, $titulo, $rutaCarpeta, function ($pageNum, $totalPages) use ($titulo, $pageProgressCallback) {
+                // Solo actualizar estado numérico, NO al log (evita saturación por tiempo)
+                $this->updateCurrentPageProgress($pageNum, $totalPages);
+                if ($pageProgressCallback !== null) {
+                    $pageProgressCallback($pageNum, $totalPages, $titulo);
+                }
+            });
+
             if (empty($mediaIds)) {
                 $this->stats['errors']++;
                 $this->updatePublishStatus($comicId, 'error', null, 'No se pudo subir ninguna imagen');
+                $this->addProgressLog("❌ No se pudo subir ninguna imagen para «{$titulo}»", 'error');
                 return [
                     'success' => false,
                     'comic_id' => $comicId,
                     'error'   => "No se pudo subir ninguna imagen para «{$titulo}»",
                 ];
             }
-            $this->log("   → {$comicId}: " . count($mediaIds) . " imágenes subidas exitosamente");
+            $this->addProgressLog("✅ {$comicId}: " . count($mediaIds) . "/{$realTotal} imágenes subidas", 'success');
         } elseif ($this->skipImageUpload) {
-            $this->log("   → Subida de imágenes omitida (modo skip_image_upload)");
+            $this->addProgressLog("⏭ Subida de imágenes omitida (modo skip_image_upload)", 'warning');
         } else {
-            $this->log("   → Sin imágenes para subir (directorio no encontrado: {$rutaCarpeta})");
+            $this->addProgressLog("⚠️ Sin imágenes para subir (directorio no encontrado: {$rutaCarpeta})", 'warning');
         }
 
-        // ── 4. PASO B: Formatear galería como string separado por comas ──
+        // ── 5. PASO B: Formatear galería como string separado por comas ──
         $imageComicString = !empty($mediaIds) ? implode(',', $mediaIds) : '';
-        $this->log(" PASO B: Galería formateada: " . ($imageComicString ?: 'vacía'));
+        $this->addProgressLog("🔗 PASO B: Galería formateada (" . count($mediaIds) . " IDs)", 'info');
 
-        // ── 5. Sincronizar taxonomías ──
-        $this->log(" PASO C: Sincronizando taxonomías con WordPress...");
+        // Helper para reintentar operaciones que fallan por rate-limiting de Banahosting
+        $retryWithBackoff = function(string $operationName, callable $operation, int $maxRetries = 3): mixed {
+            $lastException = null;
+            for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+                try {
+                    return $operation();
+                } catch (RuntimeException $e) {
+                    $lastException = $e;
+                    $errorMsg = $e->getMessage();
+                    if ($this->isConnectionError($errorMsg)) {
+                        if ($attempt < $maxRetries) {
+                            $waitTime = $attempt * 10; // 10, 20, 30 segundos
+                            $this->addProgressLog("⚠️ {$operationName}: Error de conexión (intento {$attempt}/{$maxRetries}): Reintentando en {$waitTime}s...", 'warning');
+                            sleep($waitTime);
+                        } else {
+                            $this->addProgressLog("❌ {$operationName}: Error de conexión persistente tras {$maxRetries} intentos", 'error');
+                        }
+                    } else {
+                        // Error no es de conexión — relanzar inmediatamente
+                        throw $e;
+                    }
+                }
+            }
+            throw $lastException;
+        };
+
+        // ── 6. Sincronizar taxonomías (con reintento por rate-limiting) ──
+        $this->addProgressLog("🏷️ PASO C: Sincronizando taxonomías...", 'info');
         $taxonomySyncStart = microtime(true);
 
-        $syncedIds = $this->taxonomySync->syncAll($taxData);
-        $taxPayload = $this->taxonomySync->buildTaxonomyPayload($syncedIds);
-
-        $this->log("   → Taxonomías sincronizadas en " . round(microtime(true) - $taxonomySyncStart, 2) . "s");
-        $this->log("   → IDs: " . json_encode($syncedIds, JSON_UNESCAPED_UNICODE));
-
-        // ── 6. Determinar portada (primera página del cómic) ──
-        // Las imágenes se suben en orden inverso (última página primero),
-        // por lo que la primera página (001.webp) es el último elemento del array.
-        $featuredMediaId = !empty($mediaIds) ? (int) end($mediaIds) : 0;
-        if ($featuredMediaId > 0) {
-            $this->log("   → Portada: attachment ID {$featuredMediaId} (primera página del cómic)");
+        try {
+            $syncedIds = $retryWithBackoff('Sincronización de taxonomías', function() use ($taxData): array {
+                return $this->taxonomySync->syncAll($taxData);
+            });
+        } catch (RuntimeException $e) {
+            $this->stats['errors']++;
+            $this->updatePublishStatus($comicId, 'error', null, 'Error sincronizando taxonomías: ' . $e->getMessage());
+            $this->addProgressLog("❌ Error sincronizando taxonomías: " . $e->getMessage(), 'error');
+            return [
+                'success' => false,
+                'comic_id' => $comicId,
+                'error'   => "Error sincronizando taxonomías: " . $e->getMessage(),
+            ];
         }
 
-        // ── 7. Construir payload del post ──
+        $taxPayload = $this->taxonomySync->buildTaxonomyPayload($syncedIds);
+        $this->addProgressLog("   → Taxonomías sincronizadas en " . round(microtime(true) - $taxonomySyncStart, 2) . "s", 'info');
+
+        // ── 7. Determinar portada (primera página del cómic) ──
+        $featuredMediaId = !empty($mediaIds) ? (int) end($mediaIds) : 0;
+        if ($featuredMediaId > 0) {
+            $this->addProgressLog("   → Portada: attachment ID {$featuredMediaId}", 'info');
+        }
+
+        // ── 8. Construir payload del post ──
         $payload = $this->buildPostPayload($titulo, $imageComicString, $taxPayload, $featuredMediaId);
+        $this->addProgressLog("📝 Publicando post en WordPress...", 'info');
 
-        $this->log(" PASO C: Publicando post en WordPress...");
-        $this->log("   → Payload: " . json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
-
-        // ── 7. Publicar ──
+        // ── 9. Publicar (con reintento por rate-limiting) ──
         try {
-            $response = $this->client->createPost($payload);
+            $response = $retryWithBackoff('Creación de post', function() use ($payload): array {
+                return $this->client->createPost($payload);
+            });
             $wpPostId = (int) ($response['id'] ?? 0);
 
             if ($wpPostId > 0) {
-                // ── 8. Actualizar meta del campo image_comic (segundo paso) ──
-                // El plugin ACF Photo Gallery Field (navz.me) guarda los datos
-                // a través de $_POST['acf-photo-gallery-groups'] en su hook save_post.
-                // Cuando se crea un post vía REST API, ese $_POST no existe,
-                // por lo que debemos establecer el meta manualmente.
+                // ── 10. Actualizar meta del campo image_comic (con reintento) ──
                 if ($imageComicString !== '') {
                     try {
-                        $metaResult = $this->client->updatePostMeta($wpPostId, [
-                            'image_comic'  => $imageComicString,
-                            '_image_comic' => 'field_69e4761779913',
-                        ]);
-                        $this->log("   → Meta image_comic actualizado: {$imageComicString}");
+                        $retryWithBackoff('Actualización de meta image_comic', function() use ($wpPostId, $imageComicString): void {
+                            $this->client->updatePostMeta($wpPostId, [
+                                'image_comic'  => $imageComicString,
+                                '_image_comic' => 'field_69e4761779913',
+                            ]);
+                        });
+                        $this->addProgressLog("   → Meta image_comic actualizado", 'info');
                     } catch (RuntimeException $e) {
-                        // No fatal: el post se creó, la meta se puede corregir manualmente
-                        $this->log("   ⚠️ No se pudo actualizar meta image_comic: " . $e->getMessage());
+                        // Si aún falla tras reintentos, solo advertir (no crítico)
+                        $this->addProgressLog("⚠️ No se pudo actualizar meta image_comic: " . $e->getMessage(), 'warning');
                     }
                 }
 
                 $this->stats['published']++;
                 $this->updatePublishStatus($comicId, 'published', $wpPostId);
-                $this->log("   ✅ Post creado exitosamente: WP ID {$wpPostId}");
+                $this->addProgressLog("✅ «{$titulo}» publicado (WP Post ID: {$wpPostId}, imágenes: " . count($mediaIds) . ")", 'success');
+
+                // Limpiar current_comic al terminar exitosamente
+                $this->currentProgress['current_comic'] = null;
+                $this->writeProgressFile();
 
                 return [
                     'success'     => true,
@@ -197,6 +383,7 @@ class WPPublisher
 
             $this->stats['errors']++;
             $this->updatePublishStatus($comicId, 'error', null, 'Respuesta sin ID de post');
+            $this->addProgressLog("❌ Respuesta inesperada de WordPress: sin ID de post", 'error');
             return [
                 'success' => false,
                 'comic_id' => $comicId,
@@ -205,7 +392,7 @@ class WPPublisher
         } catch (RuntimeException $e) {
             $this->stats['errors']++;
             $this->updatePublishStatus($comicId, 'error', null, $e->getMessage());
-            $this->log("   ❌ Error publicando «{$titulo}»: " . $e->getMessage());
+            $this->addProgressLog("❌ Error publicando «{$titulo}»: " . $e->getMessage(), 'error');
 
             return [
                 'success' => false,
@@ -221,9 +408,10 @@ class WPPublisher
      * @param array<int> $comicIds Lista de IDs de cómics a publicar
      * @param callable|null $progressCallback Función de callback para reportar progreso
      *        fn(array $result) => void
+     * @param callable|null $pageProgressCallback fn(int $pageNum, int $totalPages, string $titulo) => void
      * @return array<string, mixed> Resultados agregados
      */
-    public function publishBatch(array $comicIds, ?callable $progressCallback = null): array
+    public function publishBatch(array $comicIds, ?callable $progressCallback = null, ?callable $pageProgressCallback = null): array
     {
         $this->stats = [
             'total_comics'    => count($comicIds),
@@ -238,19 +426,35 @@ class WPPublisher
         // Limpiar cache de taxonomías al empezar el lote
         $this->taxonomySync->clearCache();
 
-        // Limpiar señal de stop residual de ejecuciones anteriores
-        if (defined('PUBLISH_STOP_FILE') && file_exists(PUBLISH_STOP_FILE)) {
-            @unlink(PUBLISH_STOP_FILE);
-        }
+        // Limpiar señales de stop residuales de ejecuciones anteriores
+        $this->clearStopSignals();
 
+        // Inicializar archivo de progreso
+        $this->initProgressFile('publishing');
+        $this->addProgressLog("🚀 Iniciando lote de " . count($comicIds) . " cómics...", 'info');
+
+        $processedCount = 0;
         foreach ($comicIds as $index => $comicId) {
-            // Verificar señal de detención antes de cada cómic
-            if ($this->isStopRequested()) {
-                $this->log("⏹ Señal de detención detectada. Cancelando lote después de {$index} cómics.");
+            // Verificar señal de detención HARD (stop inmediato)
+            if ($this->isHardStopRequested()) {
+                $this->addProgressLog("⏹ Señal de detención DURA detectada. Deteniendo inmediatamente.", 'warning');
+                $this->markProgressStopped('Detenido por señal dura');
                 break;
             }
 
-            $result = $this->publishComic((int) $comicId);
+            // Verificar señal de detención SOFT (terminar cómic actual y parar)
+            if ($this->isSoftStopRequested()) {
+                $this->addProgressLog("⏹ Señal de detención SUAVE detectada. Terminando cómic actual y deteniendo...", 'warning');
+                // Si ya estamos procesando un cómic, lo terminamos primero
+                if ($processedCount > 0) {
+                    // El cómic actual ya se procesó arriba, solo marcamos stop
+                }
+                $this->markProgressStopped('Detenido después del cómic actual (señal suave)');
+                break;
+            }
+
+            $result = $this->publishComic((int) $comicId, $pageProgressCallback);
+            $processedCount++;
             $this->stats['details'][] = $result;
 
             if (!empty($result['images_uploaded'])) {
@@ -266,12 +470,40 @@ class WPPublisher
                     'stats'      => $this->getStats(),
                 ]);
             }
+
+            // Pausa entre cómics para no saturar el servidor remoto
+            if ($index < count($comicIds) - 1) {
+                usleep(PUBLISH_DELAY_BETWEEN_COMICS);
+            }
+
+            // Verificar de nuevo soft stop DESPUÉS de cada cómic (para el siguiente)
+            if ($this->isSoftStopRequested()) {
+                $this->addProgressLog("⏹ Señal de detención suave detectada después de completar cómic.", 'warning');
+                $this->markProgressStopped('Detenido después del cómic actual');
+                break;
+            }
         }
 
-        // Limpiar señal de stop al terminar
-        if (defined('PUBLISH_STOP_FILE') && file_exists(PUBLISH_STOP_FILE)) {
-            @unlink(PUBLISH_STOP_FILE);
+        // Verificar si hemos terminado todos los cómics (auto-stop)
+        $remainingCount = count($comicIds) - $processedCount;
+        if ($remainingCount === 0 && $processedCount > 0) {
+            // Verificar si quedan más pendientes en BD
+            $pendingCount = $this->countPendingComics();
+            if ($pendingCount === 0) {
+                $this->markProgressSuccess("¡Todos los cómics han sido publicados! ({$this->stats['published']} publicados, {$this->stats['errors']} errores)");
+            } else {
+                $this->markProgressSuccess("Lote completado: {$this->stats['published']} publicados, {$this->stats['errors']} errores. Quedan {$pendingCount} pendientes.");
+            }
+        } elseif ($remainingCount > 0) {
+            // No se completaron todos (por stop o error)
+            $this->addProgressLog("ℹ️ Quedaron {$remainingCount} cómics sin procesar.", 'info');
+            if ($this->currentProgress['status'] === 'publishing') {
+                $this->markProgressStopped("Proceso detenido. Procesados: {$processedCount}/" . count($comicIds));
+            }
         }
+
+        // Limpiar señales de stop al terminar
+        $this->clearStopSignals();
 
         return $this->getStats();
     }
@@ -281,13 +513,17 @@ class WPPublisher
      *
      * @param int|null $limit Límite de cómics a publicar (null = todos)
      * @param callable|null $progressCallback
+     * @param callable|null $pageProgressCallback
      * @return array<string, mixed>
      */
-    public function publishPending(?int $limit = null, ?callable $progressCallback = null): array
+    public function publishPending(?int $limit = null, ?callable $progressCallback = null, ?callable $pageProgressCallback = null): array
     {
         $comicIds = $this->getPendingComicIds($limit);
 
         if (empty($comicIds)) {
+            $this->initProgressFile('completed');
+            $this->addProgressLog("✅ No hay cómics pendientes por publicar", 'success');
+            $this->markProgressSuccess('No hay cómics pendientes');
             return [
                 'total_comics' => 0,
                 'published'    => 0,
@@ -298,7 +534,7 @@ class WPPublisher
             ];
         }
 
-        return $this->publishBatch($comicIds, $progressCallback);
+        return $this->publishBatch($comicIds, $progressCallback, $pageProgressCallback);
     }
 
     /**
@@ -314,6 +550,44 @@ class WPPublisher
             'api_success'  => $clientStats['success'] ?? 0,
             'api_errors'   => $clientStats['errors'] ?? 0,
         ]);
+    }
+
+    /**
+     * Retorna el estado de progreso actual para polling de la UI.
+     *
+     * @return array<string, mixed>
+     */
+    public function getProgressState(): array
+    {
+        return $this->currentProgress;
+    }
+
+    /**
+     * Obtiene el estado actual desde el archivo de progreso.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function readProgressFile(): ?array
+    {
+        if (!defined('PUBLISH_PROGRESS_FILE') || !file_exists(PUBLISH_PROGRESS_FILE)) {
+            return null;
+        }
+        $data = @file_get_contents(PUBLISH_PROGRESS_FILE);
+        if ($data === false) {
+            return null;
+        }
+        $decoded = json_decode($data, true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * Limpia el archivo de progreso.
+     */
+    public static function clearProgressFile(): void
+    {
+        if (defined('PUBLISH_PROGRESS_FILE') && file_exists(PUBLISH_PROGRESS_FILE)) {
+            @unlink(PUBLISH_PROGRESS_FILE);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -354,7 +628,7 @@ class WPPublisher
 
             return $comic;
         } catch (Exception $e) {
-            $this->log("Error cargando datos del cómic {$comicId}: " . $e->getMessage());
+            $this->addProgressLog("Error cargando datos del cómic {$comicId}: " . $e->getMessage(), 'error');
             return null;
         }
     }
@@ -365,25 +639,66 @@ class WPPublisher
      * @param int    $comicId
      * @param string $titulo
      * @param string $rutaCarpeta
+     * @param callable|null $pageProgressCallback fn(int $pageNum, int $totalPages) => void
      * @return array<int> IDs de los attachments creados en WordPress
      */
-    private function uploadComicImages(int $comicId, string $titulo, string $rutaCarpeta): array
+    /**
+     * Verifica si un mensaje de error de cURL corresponde a un error de conexión/red
+     * (incluyendo SSL rate-limiting) que amerita reintento con backoff.
+     */
+    private function isConnectionError(string $errorMsg): bool
+    {
+        $patterns = [
+            'Could not resolve host',
+            'Connection refused',
+            'Connection timed out',
+            'Operation timed out',
+            'Failed to connect',
+            'recv failure',
+            'Unknown SSL protocol error',
+            'SSL connection timeout',
+            'SSL read timeout',
+            'SSL write timeout',
+            'SSL connection reset',
+            'SSL: no alternative certificate',
+            'error:1408F10B', // SSL routines: SSL3_GET_RECORD: wrong version number
+            'error:14094410', // SSL routines: ssl3_read_bytes: sslv3 alert handshake failure
+            'error:140943FC', // SSL routines: ssl3_read_bytes: sslv3 alert bad record mac
+            'error:00000000', // lib(0) func(0) reason(0) — conexión reseteada
+            'NSS: client certificate not found',
+            'NSS error',
+            'GnuTLS: A TLS packet with unexpected length was received',
+            'GnuTLS: Error in pull function',
+            'gnutls_handshake',
+        ];
+        foreach ($patterns as $pattern) {
+            if (stripos($errorMsg, $pattern) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Sube todas las imágenes de un cómic a WordPress.
+     *
+     * El rate limiting global (PUBLISH_RATE_LIMIT_SECONDS) en WPClient se
+     * encarga de espaciar cada petición HTTPS. Aquí solo añadimos una pausa
+     * extra entre imágenes y reintento simple en caso de error de conexión.
+     */
+    private function uploadComicImages(int $comicId, string $titulo, string $rutaCarpeta, ?callable $pageProgressCallback = null): array
     {
         $mediaIds = [];
 
-        // Escanear imágenes .webp en el directorio del cómic
         $images = $this->scanWebpImages($rutaCarpeta);
-
         if (empty($images)) {
-            $this->log("   ℹ️  No se encontraron imágenes .webp en {$rutaCarpeta}");
+            $this->addProgressLog("ℹ️ No se encontraron imágenes .webp en {$rutaCarpeta}", 'info');
             return $mediaIds;
         }
 
-        // Invertir orden: la última página se sube primero para que al
-        // publicarse en WordPress queden en orden ascendente (página 1 primero)
+        $totalImages = count($images);
+        // Invertir orden para que en WordPress queden en orden ascendente
         $images = array_reverse($images);
-
-        // Sanitizar título para usarlo como nombre base
         $titleSlug = $this->sanitizeTitleSlug($titulo);
 
         foreach ($images as $index => $imagePath) {
@@ -391,15 +706,50 @@ class WPPublisher
             $fileName = "{$comicId}-{$titleSlug}-pagina-{$pageNum}.webp";
             $altText = "{$titulo} - Página {$pageNum}";
 
-            try {
-                $response = $this->client->uploadImage($imagePath, $fileName, $altText);
-                if (isset($response['id'])) {
-                    $mediaIds[] = (int) $response['id'];
+            if ($pageProgressCallback !== null) {
+                $pageProgressCallback($pageNum, $totalImages);
+            }
+
+            if ($this->isHardStopRequested()) {
+                $this->addProgressLog("⏹ Detención dura detectada durante subida de imágenes.", 'warning');
+                break;
+            }
+
+            $uploadSuccess = false;
+            $attempts = 0;
+            $maxRetries = 2;
+
+            while ($attempts <= $maxRetries && !$uploadSuccess) {
+                $attempts++;
+                try {
+                    $response = $this->client->uploadImage($imagePath, $fileName, $altText);
+                    if (isset($response['id'])) {
+                        $mediaIds[] = (int) $response['id'];
+                        $uploadSuccess = true;
+                    }
+                } catch (RuntimeException $e) {
+                    $errorMsg = $e->getMessage();
+                    if ($this->isConnectionError($errorMsg) && $attempts <= $maxRetries) {
+                        $wait = $attempts * 10;
+                        $this->addProgressLog("⚠️ Error de conexión (pág {$pageNum}, intento {$attempts}/{$maxRetries}): esperando {$wait}s...", 'warning');
+                        sleep($wait);
+                    } elseif ($attempts <= $maxRetries) {
+                        sleep(3);
+                        $this->addProgressLog("⚠️ Reintentando pág {$pageNum} (intento {$attempts}/{$maxRetries})...", 'warning');
+                    } else {
+                        $this->stats['images_failed']++;
+                        $this->addProgressLog("❌ Falló página {$pageNum} tras {$maxRetries} intentos: " . substr($errorMsg, 0, 150), 'error');
+                    }
                 }
-            } catch (RuntimeException $e) {
-                $this->stats['images_failed']++;
-                $this->log("   ⚠️  Error subiendo imagen {$pageNum}: " . $e->getMessage());
-                // Continuar con la siguiente imagen
+            }
+
+            if (!$uploadSuccess) {
+                $this->addProgressLog("⚠️ Imagen {$pageNum}/{$totalImages} no se pudo subir", 'warning');
+            }
+
+            // Pausa extra entre imágenes (el rate limiter global ya mete 1.5s)
+            if (defined('PUBLISH_DELAY_BETWEEN_IMAGES') && PUBLISH_DELAY_BETWEEN_IMAGES > 0) {
+                usleep(PUBLISH_DELAY_BETWEEN_IMAGES);
             }
         }
 
@@ -463,15 +813,11 @@ class WPPublisher
         }
 
         // ── Campo ACF: image_comic (string separado por comas de IDs de attachment) ──
-        // El campo image_comic es de tipo 'photo_gallery' (plugin navz.me).
-        // En la REST API de ACF se envía como acf.image_comic (NO anidado bajo photo_gallery).
-        // El plugin guarda en wp_postmeta como: image_comic = "id1,id2,id3,..."
         if ($imageComicString !== '') {
             $payload['acf']['image_comic'] = $imageComicString;
         }
 
         // ── Taxonomías ──
-        // NOTA: WordPress REST API espera 'tags' (no 'post_tag') para la taxonomía post_tag
         if (isset($taxPayload['tags']) && !empty($taxPayload['tags'])) {
             $payload['tags'] = $taxPayload['tags'];
         }
@@ -506,8 +852,6 @@ class WPPublisher
     private function updatePublishStatus(int $comicId, string $status, ?int $wpPostId = null, ?string $errorMsg = null): void
     {
         try {
-            // Verificar si la columna wp_publish_status existe
-            // Si no, la creamos automáticamente
             $this->ensurePublishColumns();
 
             if ($wpPostId !== null) {
@@ -529,7 +873,7 @@ class WPPublisher
                 $stmt->execute([$status, $errorMsg, $comicId]);
             }
         } catch (Exception $e) {
-            $this->log("Error actualizando estado de publicación: " . $e->getMessage());
+            $this->addProgressLog("Error actualizando estado de publicación: " . $e->getMessage(), 'error');
         }
     }
 
@@ -539,7 +883,6 @@ class WPPublisher
     private function ensurePublishColumns(): void
     {
         try {
-            // Verificar si la columna wp_publish_status existe
             $stmt = $this->pdo->query("SHOW COLUMNS FROM comics_descargados LIKE 'wp_publish_status'");
             if (!$stmt->fetch()) {
                 $this->pdo->exec(
@@ -556,11 +899,10 @@ class WPPublisher
                      ADD INDEX idx_wp_publish_status (wp_publish_status),
                      ADD INDEX idx_wp_post_id (wp_post_id)"
                 );
-                $this->log("✅ Columnas de publicación añadidas a comics_descargados");
+                $this->addProgressLog("✅ Columnas de publicación añadidas a comics_descargados", 'success');
             }
         } catch (Exception $e) {
-            // Si falla, asumir que ya existen o ignorar
-            $this->log("Aviso: no se pudieron verificar/crear columnas de publicación: " . $e->getMessage());
+            $this->addProgressLog("Aviso: no se pudieron verificar/crear columnas de publicación: " . $e->getMessage(), 'warning');
         }
     }
 
@@ -592,8 +934,28 @@ class WPPublisher
             }
             return $ids;
         } catch (Exception $e) {
-            $this->log("Error obteniendo cómics pendientes: " . $e->getMessage());
+            $this->addProgressLog("Error obteniendo cómics pendientes: " . $e->getMessage(), 'error');
             return [];
+        }
+    }
+
+    /**
+     * Cuenta cuántos cómics pendientes hay en BD.
+     *
+     * @return int
+     */
+    private function countPendingComics(): int
+    {
+        try {
+            $this->ensurePublishColumns();
+            $stmt = $this->pdo->query(
+                "SELECT COUNT(*) FROM comics_descargados
+                 WHERE (wp_publish_status IS NULL OR wp_publish_status IN ('pending', 'error'))
+                   AND estado = 'completo'"
+            );
+            return (int) $stmt->fetchColumn();
+        } catch (Exception $e) {
+            return 0;
         }
     }
 
@@ -615,6 +977,43 @@ class WPPublisher
     }
 
     // ─────────────────────────────────────────────────────────────
+    //  STOP SIGNAL HANDLING
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Verifica si se ha solicitado una detención dura (inmediata).
+     *
+     * @return bool
+     */
+    private function isHardStopRequested(): bool
+    {
+        return defined('PUBLISH_STOP_FILE') && file_exists(PUBLISH_STOP_FILE);
+    }
+
+    /**
+     * Verifica si se ha solicitado una detención suave (después del comic actual).
+     *
+     * @return bool
+     */
+    private function isSoftStopRequested(): bool
+    {
+        return defined('PUBLISH_SOFT_STOP_FILE') && file_exists(PUBLISH_SOFT_STOP_FILE);
+    }
+
+    /**
+     * Limpia las señales de stop.
+     */
+    private function clearStopSignals(): void
+    {
+        if (defined('PUBLISH_STOP_FILE') && file_exists(PUBLISH_STOP_FILE)) {
+            @unlink(PUBLISH_STOP_FILE);
+        }
+        if (defined('PUBLISH_SOFT_STOP_FILE') && file_exists(PUBLISH_SOFT_STOP_FILE)) {
+            @unlink(PUBLISH_SOFT_STOP_FILE);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
     //  LOGGING
     // ─────────────────────────────────────────────────────────────
 
@@ -632,15 +1031,5 @@ class WPPublisher
         $logFile = $logDir . '/wp_publisher.log';
         $line = '[' . date('Y-m-d H:i:s') . '] ' . $message . PHP_EOL;
         @file_put_contents($logFile, $line, FILE_APPEND | LOCK_EX);
-    }
-
-    /**
-     * Verifica si se ha solicitado la detención del proceso.
-     *
-     * @return bool
-     */
-    private function isStopRequested(): bool
-    {
-        return defined('PUBLISH_STOP_FILE') && file_exists(PUBLISH_STOP_FILE);
     }
 }

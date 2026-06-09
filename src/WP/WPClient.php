@@ -27,6 +27,10 @@ class WPClient
     /** @var array<string, mixed> Estadísticas acumuladas de la sesión */
     private array $stats;
 
+    // ── GLOBAL Rate Limiter (compartido entre todas las instancias) ──
+    /** @var float Timestamp de la última petición (microtime) */
+    private static float $lastRequestTime = 0.0;
+
     /**
      * @param string $baseUrl  URL base del sitio WordPress (sin trailing slash)
      * @param string $username Usuario de WordPress con Application Password
@@ -91,6 +95,9 @@ class WPClient
      */
     public function uploadImage(string $filePath, string $fileName, ?string $altText = null): array
     {
+        // ── Global Rate Limiter ──
+        self::enforceRateLimit();
+
         if (!file_exists($filePath) || !is_readable($filePath)) {
             throw new RuntimeException("Archivo no encontrado o no legible: {$filePath}");
         }
@@ -360,8 +367,32 @@ class WPClient
      * @return array<string, mixed>
      * @throws RuntimeException
      */
+    /**
+     * Hace cumplir el rate limiter global: pausa si la última petición fue muy reciente.
+     */
+    private static function enforceRateLimit(): void
+    {
+        if (!defined('PUBLISH_RATE_LIMIT_SECONDS')) {
+            return;
+        }
+        $rateLimit = (float) PUBLISH_RATE_LIMIT_SECONDS;
+        if ($rateLimit <= 0) {
+            return;
+        }
+        $now = microtime(true);
+        $elapsed = $now - self::$lastRequestTime;
+        if ($elapsed < $rateLimit && self::$lastRequestTime > 0) {
+            $waitUs = (int) (($rateLimit - $elapsed) * 1000000);
+            usleep($waitUs);
+        }
+        self::$lastRequestTime = microtime(true);
+    }
+
     private function request(string $method, string $endpoint, array $queryParams = [], ?array $data = null): array
     {
+        // ── Global Rate Limiter ──
+        self::enforceRateLimit();
+
         $url = $this->baseUrl . '/' . ltrim($endpoint, '/');
         if (!empty($queryParams)) {
             $url .= '?' . http_build_query($queryParams);

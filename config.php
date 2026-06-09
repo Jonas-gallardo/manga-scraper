@@ -80,6 +80,31 @@ define('SCRAPER_STOP_FILE', sys_get_temp_dir() . '/scraper_stop.flag');
 // ── Stop Signal para WP Publisher ──
 define('PUBLISH_STOP_FILE', sys_get_temp_dir() . '/publish_stop.flag');
 
+// ── Soft Stop Signal para WP Publisher (termina comic actual y luego para) ──
+define('PUBLISH_SOFT_STOP_FILE', sys_get_temp_dir() . '/publish_soft_stop.flag');
+
+// ── Progress State para WP Publisher (JSON file for real-time UI polling) ──
+define('PUBLISH_PROGRESS_FILE', sys_get_temp_dir() . '/publish_progress.json');
+
+// ── Lock file for background publishing process ──
+define('PUBLISH_LOCK_FILE', sys_get_temp_dir() . '/publish_lock.json');
+
+// ── Path to background CLI script ──
+define('PUBLISH_BG_SCRIPT', __DIR__ . '/publish_background.php');
+
+// ── GLOBAL Rate Limiter: minimum time between ANY API call to WordPress ──
+// Banahosting rate-limits SSL connections after ~50 rapid requests.
+// 1,500,000 us = 1.5 seconds between ALL calls (image uploads, taxonomy lookups, posts, meta...)
+// This single constant prevents the site from being overwhelmed.
+define('PUBLISH_RATE_LIMIT_SECONDS', 1.5);
+
+// ── Delay between individual image uploads (DENTRO de uploadComicImages) ──
+// Se suma al rate limiter global. Total efectivo ≈ 2.5s entre imágenes.
+define('PUBLISH_DELAY_BETWEEN_IMAGES', 1000000);  // 1 second
+
+// ── Delay between publishing each comic in a batch (microseconds) ──
+define('PUBLISH_DELAY_BETWEEN_COMICS', 5000000);  // 5 seconds
+
 /**
  * Escanea un directorio y devuelve imágenes ordenadas.
  * Reemplaza a glob() que falla con caracteres no-ASCII en las rutas.
