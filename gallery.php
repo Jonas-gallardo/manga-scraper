@@ -29,6 +29,7 @@ $fecha_hasta = trim($_GET['fecha_hasta'] ?? '');
 $sort        = in_array($_GET['sort'] ?? '', ['fecha_descarga', 'titulo', 'id_fuente', 'universo', 'total_paginas'])
                ? $_GET['sort'] : 'fecha_descarga';
 $order       = strtoupper($_GET['order'] ?? 'DESC') === 'ASC' ? 'ASC' : 'DESC';
+$solo_publicados = isset($_GET['solo_publicados']) && $_GET['solo_publicados'] === '1';
 
 $offset = ($page - 1) * $per_page;
 
@@ -52,6 +53,11 @@ try {
     if ($estado) {
         $where[] = 'c.estado = :estado';
         $params[':estado'] = $estado;
+    }
+
+    // ── Filtro: solo publicados en WordPress ──
+    if ($solo_publicados) {
+        $where[] = "c.wp_publish_status = 'published'";
     }
 
     // ── Filtro por rango de fechas ──
@@ -103,6 +109,7 @@ try {
     foreach ($comics as &$comic) {
         $comic['portada'] = null;
         $comic['archivos_reales'] = 0;
+        $comic['imagenes_eliminadas'] = (bool) ($comic['imagenes_eliminadas'] ?? false);
 
         // ── Parsear taxonomías JSON para el frontend ──
         if (!empty($comic['taxonomias'])) {

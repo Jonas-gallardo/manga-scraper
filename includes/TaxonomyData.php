@@ -688,7 +688,7 @@ class TaxonomyData
         'Los Simpson',
         'Miraculous',
         'Monsters Inc',
-        'My Hero Academy',
+        'My Hero Academia',
         'Naruto',
         'Nier Automata',
         'One Piece',

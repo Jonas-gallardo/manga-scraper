@@ -35,6 +35,26 @@ function get_comic_pages(PDO $pdo, int $id): ?array {
 if (isset($_GET['comic_id'])) {
     $id = (int) $_GET['comic_id'];
 
+    // ── Detectar si las imágenes fueron eliminadas (optimización de espacio) ──
+    $stmt = $pdo->prepare(
+        'SELECT id_fuente, titulo, wp_post_id, imagenes_eliminadas
+         FROM comics_descargados WHERE id_fuente = ?'
+    );
+    $stmt->execute([$id]);
+    $comic_meta = $stmt->fetch();
+
+    if ($comic_meta && !empty($comic_meta['imagenes_eliminadas'])) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success'           => false,
+            'imagenes_eliminadas' => true,
+            'titulo'            => $comic_meta['titulo'],
+            'wp_post_id'        => (int) $comic_meta['wp_post_id'],
+            'message'           => 'Este cómic ya fue subido a WordPress/Gluglux y sus imágenes fueron eliminadas del almacenamiento local para optimizar espacio.',
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     // ── Modo portada (cover) ──
     if (isset($_GET['cover'])) {
         $result = get_comic_pages($pdo, $id);

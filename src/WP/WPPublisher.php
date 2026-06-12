@@ -189,11 +189,18 @@ class WPPublisher
     /**
      * Limpia el archivo de progreso después de un breve retardo
      * para que la UI tenga tiempo de leer el estado final.
+     *
+     * La UI (JavaScript) espera 5s antes de llamar a clearProgressSilent(),
+     * pero si el usuario cierra/recarga antes, el archivo queda huérfano.
+     * Este método programa una auto-limpieza PHP via shutdown.
      */
     private function cleanProgressFileAfterDelay(): void
     {
-        // No eliminar inmediatamente — la UI necesita leer el estado final
-        // Se eliminará cuando se inicie una nueva operación
+        // Marcar el timestamp de finalización para que handleProgress()
+        // pueda detectar archivos stale tras 30s de inactividad.
+        $this->currentProgress['ended'] = date('c');
+        $this->currentProgress['_finished_at'] = time();
+        $this->writeProgressFile();
     }
 
     /**
@@ -251,13 +258,15 @@ class WPPublisher
             $this->setCurrentComic($comicId, $titulo, $realTotal);
             $this->addProgressLog("📤 PASO A: Subiendo {$realTotal} imágenes...", 'info');
 
-            $mediaIds = $this->uploadComicImages($comicId, $titulo, $rutaCarpeta, function ($pageNum, $totalPages) use ($titulo, $pageProgressCallback) {
+            $uploadResult = $this->uploadComicImages($comicId, $titulo, $rutaCarpeta, function ($pageNum, $totalPages) use ($titulo, $pageProgressCallback) {
                 // Solo actualizar estado numérico, NO al log (evita saturación por tiempo)
                 $this->updateCurrentPageProgress($pageNum, $totalPages);
                 if ($pageProgressCallback !== null) {
                     $pageProgressCallback($pageNum, $totalPages, $titulo);
                 }
             });
+            $mediaIds    = $uploadResult['media_ids'] ?? [];
+            $failedPages = $uploadResult['failed_pages'] ?? [];
 
             if (empty($mediaIds)) {
                 $this->stats['errors']++;
@@ -339,8 +348,15 @@ class WPPublisher
         $this->addProgressLog("📝 Publicando post en WordPress...", 'info');
 
         // ── 9. Publicar (con reintento por rate-limiting) ──
+        // En entornos LiteSpeed/CGI, /wp-json/wp/v2/posts pierde el
+        // header Authorization. Si el bridge está activo, lo usamos también
+        // para crear el post y evitar HTTP 401.
+        $useBridge = defined('UPLOAD_USE_BRIDGE') && UPLOAD_USE_BRIDGE;
         try {
-            $response = $retryWithBackoff('Creación de post', function() use ($payload): array {
+            $response = $retryWithBackoff('Creación de post', function() use ($payload, $useBridge): array {
+                if ($useBridge) {
+                    return $this->client->createPostViaBridge($payload);
+                }
                 return $this->client->createPost($payload);
             });
             $wpPostId = (int) ($response['id'] ?? 0);
@@ -364,19 +380,28 @@ class WPPublisher
 
                 $this->stats['published']++;
                 $this->updatePublishStatus($comicId, 'published', $wpPostId);
-                $this->addProgressLog("✅ «{$titulo}» publicado (WP Post ID: {$wpPostId}, imágenes: " . count($mediaIds) . ")", 'success');
-
+                $imagesTotal = $realTotal;
+                $imagesLost = count($failedPages);
+                $msg = "✅ «{$titulo}» publicado (WP Post ID: {$wpPostId}, imágenes: " . count($mediaIds) . "/{$imagesTotal}";
+                if ($imagesLost > 0) {
+                    $msg .= ", quedaron {$imagesLost} pendientes de rescate";
+                }
+                $msg .= ")";
+                $this->addProgressLog($msg, 'success');
+    
                 // Limpiar current_comic al terminar exitosamente
                 $this->currentProgress['current_comic'] = null;
                 $this->writeProgressFile();
-
+    
                 return [
                     'success'     => true,
                     'comic_id'    => $comicId,
                     'wp_post_id'  => $wpPostId,
                     'titulo'      => $titulo,
                     'images_uploaded' => count($mediaIds),
+                    'images_total'    => $imagesTotal,
                     'media_ids'   => $mediaIds,
+                    'failed_pages'    => $failedPages,
                     'taxonomies'  => $syncedIds,
                 ];
             }
@@ -484,15 +509,36 @@ class WPPublisher
             }
         }
 
+        // ── Segunda pasada de rescate: reintentar imágenes que fallaron ──
+        $rescueStats = $this->rescueFailedImages();
+        if ($rescueStats['rescued'] > 0) {
+            $this->stats['images_uploaded'] += $rescueStats['rescued'];
+            $this->stats['images_failed']  -= $rescueStats['rescued'];
+            if ($this->stats['images_failed'] < 0) {
+                $this->stats['images_failed'] = 0;
+            }
+        }
+
+        // ── Guardar log de auditoría del batch completo ──
+        $this->saveBatchAuditLog($comicIds, $processedCount);
+
         // Verificar si hemos terminado todos los cómics (auto-stop)
         $remainingCount = count($comicIds) - $processedCount;
         if ($remainingCount === 0 && $processedCount > 0) {
             // Verificar si quedan más pendientes en BD
             $pendingCount = $this->countPendingComics();
+            // Armar mensaje final con estadísticas de rescate
+            $finalMsg = "{$this->stats['published']} publicados, {$this->stats['errors']} errores";
+            if ($rescueStats['rescued'] > 0) {
+                $finalMsg .= ", {$rescueStats['rescued']} imágenes rescatadas";
+            }
+            if ($rescueStats['still_failed'] > 0) {
+                $finalMsg .= ", {$rescueStats['still_failed']} irrecuperables";
+            }
             if ($pendingCount === 0) {
-                $this->markProgressSuccess("¡Todos los cómics han sido publicados! ({$this->stats['published']} publicados, {$this->stats['errors']} errores)");
+                $this->markProgressSuccess("¡Todos los cómics han sido publicados! ({$finalMsg})");
             } else {
-                $this->markProgressSuccess("Lote completado: {$this->stats['published']} publicados, {$this->stats['errors']} errores. Quedan {$pendingCount} pendientes.");
+                $this->markProgressSuccess("Lote completado: {$finalMsg}. Quedan {$pendingCount} pendientes.");
             }
         } elseif ($remainingCount > 0) {
             // No se completaron todos (por stop o error)
@@ -689,10 +735,15 @@ class WPPublisher
     private function uploadComicImages(int $comicId, string $titulo, string $rutaCarpeta, ?callable $pageProgressCallback = null): array
     {
         $mediaIds = [];
+        $failedPages = [];
+
+        // ── Iniciar sesión keep-alive: 1 handshake SSL para todo el cómic ──
+        $this->client->beginImageSession("{$comicId} - {$titulo}");
 
         $images = $this->scanWebpImages($rutaCarpeta);
         if (empty($images)) {
             $this->addProgressLog("ℹ️ No se encontraron imágenes .webp en {$rutaCarpeta}", 'info');
+            $this->client->endImageSession();
             return $mediaIds;
         }
 
@@ -700,6 +751,10 @@ class WPPublisher
         // Invertir orden para que en WordPress queden en orden ascendente
         $images = array_reverse($images);
         $titleSlug = $this->sanitizeTitleSlug($titulo);
+
+        // ── Tracker de fallos SSL consecutivos para backoff exponencial ──
+        $consecutiveSslFailures = 0;
+        $maxConsecutiveSsl = defined('PUBLISH_MAX_CONSECUTIVE_SSL_FAILURES') ? (int) PUBLISH_MAX_CONSECUTIVE_SSL_FAILURES : 3;
 
         foreach ($images as $index => $imagePath) {
             $pageNum = $index + 1;
@@ -722,38 +777,84 @@ class WPPublisher
             while ($attempts <= $maxRetries && !$uploadSuccess) {
                 $attempts++;
                 try {
+                    // ── Si hay fallos SSL consecutivos, hacer backoff antes de reintentar ──
+                    if ($consecutiveSslFailures >= $maxConsecutiveSsl) {
+                        $extendedWait = min(pow(2, $consecutiveSslFailures) * 5, 120);
+                        $this->addProgressLog("🛑 {$consecutiveSslFailures} fallos SSL consecutivos. Pausa extendida de {$extendedWait}s para dejar respirar al servidor...", 'warning');
+                        sleep((int) $extendedWait);
+                        $consecutiveSslFailures = 0; // Reset tras pausa extendida
+                    }
+
                     $response = $this->client->uploadImage($imagePath, $fileName, $altText);
                     if (isset($response['id'])) {
                         $mediaIds[] = (int) $response['id'];
                         $uploadSuccess = true;
+                        $consecutiveSslFailures = 0; // Éxito → resetear contador
                     }
                 } catch (RuntimeException $e) {
                     $errorMsg = $e->getMessage();
+                    $isSslError = (stripos($errorMsg, 'Unknown SSL protocol error') !== false)
+                               || (stripos($errorMsg, 'SSL connection') !== false)
+                               || (stripos($errorMsg, 'SSL:') !== false)
+                               || (stripos($errorMsg, 'SSL read') !== false)
+                               || (stripos($errorMsg, 'SSL write') !== false)
+                               || (stripos($errorMsg, 'gnutls_handshake') !== false);
+
+                    if ($isSslError) {
+                        $consecutiveSslFailures++;
+
+                        if ($consecutiveSslFailures >= $maxConsecutiveSsl) {
+                            // Se manejara al inicio del siguiente intento/iteración
+                            $this->addProgressLog(
+                                "⚠️ SSL Error (pág {$pageNum}, intento {$attempts}/{$maxRetries}, fallo consecutivo #{$consecutiveSslFailures})",
+                                'warning'
+                            );
+                        }
+                    }
+
                     if ($this->isConnectionError($errorMsg) && $attempts <= $maxRetries) {
-                        $wait = $attempts * 10;
+                        $wait = $attempts * 10 + ($consecutiveSslFailures * 5);
+                        $wait = min($wait, 60); // Cap en 60s por intento individual
                         $this->addProgressLog("⚠️ Error de conexión (pág {$pageNum}, intento {$attempts}/{$maxRetries}): esperando {$wait}s...", 'warning');
                         sleep($wait);
                     } elseif ($attempts <= $maxRetries) {
-                        sleep(3);
+                        usleep(1500000); // 1.5s en vez de 3s, mas agil para errores no-SSL
                         $this->addProgressLog("⚠️ Reintentando pág {$pageNum} (intento {$attempts}/{$maxRetries})...", 'warning');
                     } else {
                         $this->stats['images_failed']++;
-                        $this->addProgressLog("❌ Falló página {$pageNum} tras {$maxRetries} intentos: " . substr($errorMsg, 0, 150), 'error');
+                        $this->addProgressLog("❌ Falló página {$pageNum} tras " . ($maxRetries + 1) . " intentos: " . substr($errorMsg, 0, 150), 'error');
                     }
                 }
             }
 
             if (!$uploadSuccess) {
                 $this->addProgressLog("⚠️ Imagen {$pageNum}/{$totalImages} no se pudo subir", 'warning');
+                $failedPages[] = [
+                    'page_num'   => $pageNum,
+                    'image_path' => $imagePath,
+                    'file_name'  => $fileName,
+                    'alt_text'   => $altText,
+                ];
             }
 
-            // Pausa extra entre imágenes (el rate limiter global ya mete 1.5s)
-            if (defined('PUBLISH_DELAY_BETWEEN_IMAGES') && PUBLISH_DELAY_BETWEEN_IMAGES > 0) {
-                usleep(PUBLISH_DELAY_BETWEEN_IMAGES);
+            // ── Pausa ALEATORIA entre imágenes para no parecer un ataque ──
+            // El rate limiter global ya mete 1.5s. La pausa aleatoria añade 0.5-2.0s extra.
+            // Total efectivo: 2.0-3.5s entre imágenes, variando aleatoriamente.
+            $delayMin = defined('PUBLISH_DELAY_IMAGES_MIN') ? (int) PUBLISH_DELAY_IMAGES_MIN : 500000;
+            $delayMax = defined('PUBLISH_DELAY_IMAGES_MAX') ? (int) PUBLISH_DELAY_IMAGES_MAX : 2000000;
+            if ($delayMax > $delayMin) {
+                $randomDelay = rand($delayMin, $delayMax);
+                usleep($randomDelay);
             }
         }
 
-        return $mediaIds;
+        // ── Finalizar sesión keep-alive (cerrar handle SSL compartido) ──
+        $this->client->endImageSession();
+
+        return [
+            'media_ids'    => $mediaIds,
+            'failed_pages' => $failedPages,
+        ];
     }
 
     /**
@@ -801,6 +902,13 @@ class WPPublisher
      */
     private function buildPostPayload(string $titulo, string $imageComicString, array $taxPayload, int $featuredMediaId = 0): array
     {
+        // Sanitizar título para HTTP: elimina caracteres que disparan
+        // WAFs como cPGuard / Imunify360 (zero-width, bidi, control chars)
+        $titulo = $this->sanitizeForHttp($titulo);
+        if ($titulo === '') {
+            $titulo = 'Sin título';
+        }
+
         $payload = [
             'title'  => $titulo,
             'status' => 'publish',
@@ -901,6 +1009,18 @@ class WPPublisher
                 );
                 $this->addProgressLog("✅ Columnas de publicación añadidas a comics_descargados", 'success');
             }
+
+            // ── Asegurar columna imagenes_eliminadas ──
+            $stmt = $this->pdo->query("SHOW COLUMNS FROM comics_descargados LIKE 'imagenes_eliminadas'");
+            if (!$stmt->fetch()) {
+                $this->pdo->exec(
+                    "ALTER TABLE comics_descargados
+                     ADD COLUMN imagenes_eliminadas TINYINT(1) DEFAULT 0
+                     COMMENT '1 = imágenes borradas del disco tras publicar en WP (optimizar espacio)'
+                     AFTER wp_publish_error"
+                );
+                $this->addProgressLog("✅ Columna imagenes_eliminadas añadida a comics_descargados", 'success');
+            }
         } catch (Exception $e) {
             $this->addProgressLog("Aviso: no se pudieron verificar/crear columnas de publicación: " . $e->getMessage(), 'warning');
         }
@@ -976,6 +1096,53 @@ class WPPublisher
         return $slug ?: 'comic';
     }
 
+    /**
+     * Sanitiza un string para envío HTTP seguro, eliminando caracteres
+     * que firewalls WAF (cPGuard, Imunify360, mod_security) pueden
+     * interpretar como intentos de inyección o caracteres inválidos.
+     *
+     * Elimina:
+     *  - Caracteres de control ASCII (0x00-0x1F excepto \t, \n, \r)
+     *  - Caracteres de control C1 (0x80-0x9F)
+     *  - Zero-width spaces y marcas de dirección Unicode (Bidi)
+     *  - Separadores de línea/párrafo Unicode
+     *  - BOM (Byte Order Mark) U+FEFF
+     *  - Caracteres de sustitución y no asignados
+     *
+     * Preserva: letras, números, acentos, ñ, puntuación común,
+     * emojis y caracteres CJK legítimos.
+     *
+     * @param string $text Texto a sanitizar
+     * @return string Texto limpio, seguro para tránsito HTTP
+     */
+    private function sanitizeForHttp(string $text): string
+    {
+        // Normalizar a UTF-8 NFC (compatibilidad máxima con WordPress)
+        if (function_exists('normalizer_normalize')) {
+            $text = @normalizer_normalize($text, \Normalizer::FORM_C);
+            if ($text === false) {
+                $text = ''; // String corrupto → vacío seguro
+            }
+        }
+
+        // Eliminar:
+        // - Control chars ASCII excepto tab, newline, carriage return
+        // - C1 control chars (0x80-0x9F)
+        // - Zero-width spaces: U+200B (ZWSP), U+200C (ZWNJ), U+200D (ZWJ), U+FEFF (BOM)
+        // - Bidi directionals: U+200E (LRM), U+200F (RLM), U+202A-U+202E
+        // - Line/paragraph separators: U+2028, U+2029
+        $text = preg_replace(
+            '/[\x{0000}-\x{0008}\x{000B}\x{000C}\x{000E}-\x{001F}\x{007F}-\x{009F}\x{200B}-\x{200F}\x{2028}\x{2029}\x{202A}-\x{202E}\x{FEFF}]/u',
+            '',
+            $text
+        );
+
+        // Colapsar espacios múltiples consecutivos
+        $text = preg_replace('/[ \t]+/', ' ', $text);
+
+        return trim($text);
+    }
+
     // ─────────────────────────────────────────────────────────────
     //  STOP SIGNAL HANDLING
     // ─────────────────────────────────────────────────────────────
@@ -1031,5 +1198,203 @@ class WPPublisher
         $logFile = $logDir . '/wp_publisher.log';
         $line = '[' . date('Y-m-d H:i:s') . '] ' . $message . PHP_EOL;
         @file_put_contents($logFile, $line, FILE_APPEND | LOCK_EX);
+    }
+
+    /**
+     * Guarda un log de auditoría completo del batch en formato JSON.
+     *
+     * Cada archivo contiene: estadísticas, resultados detallados por cómic,
+     * IDs de imágenes subidas/fallidas, taxonomías sincronizadas, timestamps
+     * y el log de progreso completo. Esto permite auditoría post-mortem y
+     * diagnóstico de fallos recurrentes sin depender de la UI.
+     *
+     * @param array<int> $comicIds       Lista de IDs del batch
+     * @param int        $processedCount Cuántos se procesaron realmente
+     */
+    /**
+     * Segunda pasada de rescate: reintenta subir imágenes que fallaron durante
+     * la primera pasada, y repara los posts de WordPress insertando los nuevos
+     * attachment IDs en la posición correcta dentro de image_comic.
+     *
+     * Estrategia:
+     * 1. Esperar 60s para que el rate-limiting de Banahosting se resetee
+     * 2. Subir cada imagen fallida con handle NO persistente (fresh cada vez)
+     * 3. Si éxito, empalmar el nuevo attachment ID en la posición correcta
+     * 4. Actualizar post meta (image_comic) vía updatePostMeta con reintento
+     *
+     * @return array{rescued: int, still_failed: int} Estadísticas del rescate
+     */
+    private function rescueFailedImages(): array
+    {
+        $stats = ['rescued' => 0, 'still_failed' => 0];
+
+        // ── 1. Recolectar todas las páginas fallidas de todos los cómics ──
+        $toRescue = [];
+        foreach ($this->stats['details'] as $detail) {
+            if (!empty($detail['success']) && !empty($detail['failed_pages']) && !empty($detail['wp_post_id'])) {
+                $toRescue[] = [
+                    'comic_id'     => $detail['comic_id'],
+                    'wp_post_id'   => $detail['wp_post_id'],
+                    'titulo'       => $detail['titulo'] ?? '',
+                    'failed_pages' => $detail['failed_pages'],
+                    'media_ids'    => $detail['media_ids'] ?? [],
+                    'images_total' => $detail['images_total'] ?? count($detail['media_ids'] ?? []) + count($detail['failed_pages'] ?? []),
+                ];
+            }
+        }
+
+        if (empty($toRescue)) {
+            $this->addProgressLog("🎯 Rescate: No hay imágenes pendientes por rescatar.", 'info');
+            return $stats;
+        }
+
+        $totalFailed = array_sum(array_map(fn($c) => count($c['failed_pages']), $toRescue));
+        $this->addProgressLog("", 'info');
+        $this->addProgressLog("🎯 ── SEGUNDA PASADA DE RESCATE ──", 'info');
+        $this->addProgressLog("🎯 Rescatando {$totalFailed} imágenes fallidas en " . count($toRescue) . " cómics...", 'info');
+
+        // ── 2. Esperar 60s para que el rate-limiting de Banahosting se resetee ──
+        $this->addProgressLog("⏳ Esperando 60s para que el servidor se calme antes del rescate...", 'info');
+        sleep(60);
+        $this->addProgressLog("▶️ Iniciando rescate...", 'info');
+
+        // ── 3. Para cada cómic, reintentar sus páginas fallidas ──
+        foreach ($toRescue as $entry) {
+            $comicId   = $entry['comic_id'];
+            $wpPostId  = $entry['wp_post_id'];
+            $titulo    = $entry['titulo'];
+            $mediaIds  = $entry['media_ids'];
+            $total     = $entry['images_total'];
+            $failed    = $entry['failed_pages'];
+
+            $this->addProgressLog("🔧 Rescatando «{$titulo}» (ID {$comicId}, WP Post ID {$wpPostId}): " . count($failed) . " imágenes pendientes...", 'info');
+
+            // Iniciar sesión keep-alive para este cómic
+            $this->client->beginImageSession("{$comicId} - {$titulo} [RESCATE]");
+
+            $repairedCount = 0;
+            foreach ($failed as $fp) {
+                $pageNum  = $fp['page_num'];
+                $filePath = $fp['image_path'];
+                $fileName = $fp['file_name'];
+                $altText  = $fp['alt_text'];
+
+                // Verificar señal de stop
+                if ($this->isHardStopRequested()) {
+                    $this->addProgressLog("⏹ Detención dura durante rescate.", 'warning');
+                    break 2;
+                }
+
+                try {
+                    // ── Aplicar rate limiting manual (no queremos saturar) ──
+                    usleep(1500000); // 1.5s entre cada intento de rescate
+
+                    $response = $this->client->uploadImage($filePath, $fileName, $altText);
+
+                    if (isset($response['id'])) {
+                        $newAttachmentId = (int) $response['id'];
+
+                        // ── 4. Insertar el ID en la posición correcta del array ──
+                        // $mediaIds se construye en orden INVERSO en uploadComicImages():
+                        //   las imágenes se escanean ascendentes (p1, p2, ..., pN),
+                        //   se invierten con array_reverse, y se suben como pN, pN-1, ..., p1.
+                        // Por tanto, en $mediaIds el índice 0 = página N, índice N-1 = página 1.
+                        // Para pageNum = P (1-indexed), posición = totalImages - P
+                        $insertPos = $total - $pageNum;
+                        if ($insertPos >= count($mediaIds)) {
+                            $mediaIds[] = $newAttachmentId;
+                        } else {
+                            array_splice($mediaIds, $insertPos, 0, $newAttachmentId);
+                        }
+                        $newImageComic = implode(',', $mediaIds);
+
+                        // ── 5. Actualizar post meta (con reintento) ──
+                        $metaOk = false;
+                        $metaAttempts = 0;
+                        $metaMaxRetries = 3;
+                        while (!$metaOk && $metaAttempts < $metaMaxRetries) {
+                            $metaAttempts++;
+                            try {
+                                $this->client->updatePostMeta($wpPostId, [
+                                    'image_comic'  => $newImageComic,
+                                    '_image_comic' => 'field_69e4761779913',
+                                ]);
+                                $metaOk = true;
+                            } catch (RuntimeException $metaE) {
+                                if ($metaAttempts < $metaMaxRetries) {
+                                    $this->addProgressLog("⚠️ Reintentando meta image_comic (intento {$metaAttempts}/{$metaMaxRetries})...", 'warning');
+                                    sleep($metaAttempts * 5);
+                                } else {
+                                    throw $metaE;
+                                }
+                            }
+                        }
+
+                        $repairedCount++;
+                        $stats['rescued']++;
+                        $this->addProgressLog("   ✅ Rescatada página {$pageNum} → attachment ID {$newAttachmentId}", 'success');
+                        $this->log("🎯 [RESCATE] Cómic {$comicId}: página {$pageNum} rescatada (attachment {$newAttachmentId})");
+                    }
+                } catch (RuntimeException $e) {
+                    $stats['still_failed']++;
+                    $this->addProgressLog("   ❌ Página {$pageNum} sigue fallando tras rescate: " . substr($e->getMessage(), 0, 100), 'error');
+                    $this->log("🎯 [RESCATE] Cómic {$comicId}: página {$pageNum} IRRECUPERABLE: " . $e->getMessage());
+                }
+            }
+
+            $this->client->endImageSession();
+
+            if ($repairedCount > 0) {
+                $this->addProgressLog("🎉 «{$titulo}»: {$repairedCount}/" . count($failed) . " imágenes rescatadas exitosamente.", 'success');
+            }
+        }
+
+        $this->addProgressLog("🎯 Rescate completado: {$stats['rescued']} rescatadas, {$stats['still_failed']} siguen fallando.", 'info');
+
+        return $stats;
+    }
+
+    private function saveBatchAuditLog(array $comicIds, int $processedCount): void
+    {
+        // Solo guardar si hay resultados que valga la pena auditar
+        if (empty($this->stats['details'])) {
+            return;
+        }
+
+        $batchLogDir = defined('PUBLISH_BATCH_LOG_DIR') ? PUBLISH_BATCH_LOG_DIR : __DIR__ . '/../../logs/batches';
+        if (!is_dir($batchLogDir)) {
+            @mkdir($batchLogDir, 0777, true);
+        }
+
+        $batchId = date('Ymd_His');
+        $auditData = [
+            'batch_id'        => $batchId,
+            'started_at'      => date('c'),
+            'ended_at'        => date('c'),
+            'trigger'         => php_sapi_name() === 'cli' ? 'CLI' : 'Web',
+            'total_requested' => count($comicIds),
+            'total_processed' => $processedCount,
+            'stop_reason'     => $this->currentProgress['status'] ?? 'unknown',
+            'stats'           => $this->stats,
+            'comics'          => $this->stats['details'],
+            'progress_log'    => $this->currentProgress['log'] ?? [],
+        ];
+
+        // ── Enriquecer cada cómic con conteo de imágenes fallidas ──
+        foreach ($auditData['comics'] as &$comic) {
+            if (isset($comic['media_ids']) && is_array($comic['media_ids'])) {
+                $comic['images_succeeded'] = count($comic['media_ids']);
+            } else {
+                $comic['images_succeeded'] = 0;
+            }
+        }
+        unset($comic);
+
+        $filename = $batchLogDir . '/batch_' . $batchId . '.json';
+        $json = json_encode($auditData, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        @file_put_contents($filename, $json, LOCK_EX);
+
+        // También registrar en el log tradicional
+        $this->log("📋 Log de auditoría guardado: {$filename} (" . count($this->stats['details']) . " cómics, {$this->stats['published']} publicados, {$this->stats['errors']} errores)");
     }
 }

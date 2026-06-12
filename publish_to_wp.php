@@ -314,6 +314,10 @@ function handleStatus(PDO $pdo): void
 
 /**
  * Devuelve el progreso en tiempo real desde el archivo de progreso.
+ *
+ * Detecta archivos de progreso huérfanos (proceso terminó pero el archivo
+ * no fue limpiado) y los trata como inactivos para que la UI no muestre
+ * logs viejos ni se quede atascada en "En Progreso".
  */
 function handleProgress(): void
 {
@@ -331,6 +335,75 @@ function handleProgress(): void
             ],
         ], JSON_UNESCAPED_UNICODE);
         return;
+    }
+
+    // ── Detectar archivos de progreso huérfanos ──
+    // Si el estado es terminal (completed, stopped, error) y:
+    //   - No hay lock de proceso en ejecución, O
+    //   - El archivo se escribió por última vez hace más de 60s
+    // entonces el archivo es basura y debe tratarse como idle.
+    $status = $progress['status'] ?? '';
+    $isTerminal = in_array($status, ['completed', 'stopped', 'error'], true);
+    $lockExists = defined('PUBLISH_LOCK_FILE') && file_exists(PUBLISH_LOCK_FILE);
+
+    // ── CASO 1: Estado "publishing" pero sin lock → proceso muerto, archivo huérfano ──
+    if ($status === 'publishing' && !$lockExists) {
+        // Si el timestamp es muy viejo (>120s), es basura definitiva
+        $ts = (int) ($progress['timestamp'] ?? 0);
+        if ($ts > 0 && time() - $ts > 120) {
+            WPPublisher::clearProgressFile();
+            echo json_encode([
+                'success' => false,
+                'message' => 'No hay proceso de publicación en curso',
+                'data'    => [
+                    'status' => 'idle',
+                    'current_comic' => null,
+                    'stats' => null,
+                    'log'   => [],
+                ],
+            ], JSON_UNESCAPED_UNICODE);
+            return;
+        }
+    }
+
+    // ── CASO 2: Estado terminal (completed/stopped/error) ──
+    if ($isTerminal) {
+        $staleSeconds = 60;
+        $isStale = false;
+
+        if (!$lockExists) {
+            // Sin lock = sin proceso activo = stale seguro
+            $isStale = true;
+        } elseif (isset($progress['_finished_at'])) {
+            // El proceso terminó hace más de N segundos
+            $finishedAt = (int) $progress['_finished_at'];
+            if (time() - $finishedAt > $staleSeconds) {
+                $isStale = true;
+            }
+        } elseif (isset($progress['timestamp'])) {
+            // Fallback: si el timestamp es muy viejo
+            $ts = (int) $progress['timestamp'];
+            if (time() - $ts > 120) {
+                $isStale = true;
+            }
+        }
+
+        if ($isStale) {
+            // Limpiar archivo huérfano para la próxima consulta
+            WPPublisher::clearProgressFile();
+
+            echo json_encode([
+                'success' => false,
+                'message' => 'No hay proceso de publicación en curso',
+                'data'    => [
+                    'status' => 'idle',
+                    'current_comic' => null,
+                    'stats' => null,
+                    'log'   => [],
+                ],
+            ], JSON_UNESCAPED_UNICODE);
+            return;
+        }
     }
 
     echo json_encode([
@@ -966,6 +1039,53 @@ function renderWebUI(): void
                 </div>
             </div>
             <?php endif; ?>
+
+            <!-- ── Optimizar Espacio ── -->
+            <div class="glass p-5 mt-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+                        🗜️ Optimizar Espacio en Disco
+                    </h3>
+                    <span id="optimize-stats" class="text-xs text-gray-500">Cargando...</span>
+                </div>
+                <p class="text-xs text-gray-500 mb-4">
+                    Cómics ya publicados en Gluglux que aún conservan imágenes locales.
+                    Liberar espacio <strong>no borra</strong> los registros — solo elimina las imágenes del disco.
+                </p>
+
+                <!-- Tabla de candidatos -->
+                <div class="overflow-x-auto mb-4">
+                    <table class="w-full text-sm" id="optimize-table-container">
+                        <thead>
+                            <tr class="text-gray-500 text-xs uppercase tracking-wider">
+                                <th class="text-left py-2 pr-2 w-8">
+                                    <input type="checkbox" id="optimize-select-all" onchange="toggleSelectAll(this)" class="rounded">
+                                </th>
+                                <th class="text-left py-2 pr-4">ID</th>
+                                <th class="text-left py-2 pr-4">Título</th>
+                                <th class="text-left py-2 pr-4">Universo</th>
+                                <th class="text-left py-2 pr-4">Tamaño</th>
+                                <th class="text-left py-2 pr-4">WP Post</th>
+                            </tr>
+                        </thead>
+                        <tbody id="optimize-table-body">
+                            <tr><td colspan="6" class="py-8 text-center text-gray-600">Cargando lista de cómics publicados...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Acciones -->
+                <div class="flex flex-wrap gap-3 items-center">
+                    <button onclick="freeSelectedSpace()" id="btn-free-space"
+                            class="btn-danger text-xs px-4 py-2 flex items-center gap-1.5" disabled>
+                        🗑️ Liberar Espacio Seleccionado
+                    </button>
+                    <button onclick="loadOptimizeList()" class="btn-ghost text-xs px-4 py-2">
+                        🔄 Refrescar Lista
+                    </button>
+                    <span id="optimize-result" class="text-xs text-emerald-400 hidden"></span>
+                </div>
+            </div>
         </div>
 
         <script>
@@ -987,9 +1107,16 @@ function renderWebUI(): void
             log('Log limpiado.', 'info');
         }
 
+        /**
+         * Deshabilita/habilita botones de acción durante la publicación.
+         * IMPORTANTE: Los botones de stop (.btn-danger, .btn-warning) NUNCA se deshabilitan,
+         * para que el usuario siempre pueda detener el proceso incluso si gluglux se cae.
+         */
         function setLoading(loading) {
-            const buttons = document.querySelectorAll('.btn-glow, .btn-success, .btn-danger, .btn-warning');
+            const buttons = document.querySelectorAll('.btn-glow, .btn-success');
             buttons.forEach(b => b.disabled = loading);
+            // Los botones .btn-danger y .btn-warning (Detener / Detener Suave)
+            // se mantienen SIEMPRE habilitados para que el usuario pueda cancelar.
         }
 
         // ── Progress Bar ──
@@ -1022,10 +1149,16 @@ function renderWebUI(): void
 
         // ── Real-time Progress Polling ──
         function startPublishingPolling() {
-            if (publishingInterval) return;
+            // Si ya hay polling activo, detenerlo primero
+            if (publishingInterval) {
+                clearInterval(publishingInterval);
+                publishingInterval = null;
+            }
             isPublishing = true;
             setStatusBadge(true);
             resetProgressBar();
+            // Resetear el contador de mensajes mostrados para no perder logs nuevos
+            pollProgress._shownCount = 0;
 
             // Poll cada 1 segundo
             publishingInterval = setInterval(pollProgress, 1000);
@@ -1127,6 +1260,8 @@ function renderWebUI(): void
             const limit = document.getElementById('batch-limit').value || 10;
 
             setLoading(true);
+            // Limpiar el log DOM y el archivo de progreso antes de empezar
+            clearLogDOM();
             log(`▶️ Solicitando lote de ${limit} cómics...`, 'info');
 
             // Limpiar progreso anterior antes de nueva publicación
@@ -1157,6 +1292,8 @@ function renderWebUI(): void
 
         async function publishAll() {
             setLoading(true);
+            // Limpiar el log DOM y el archivo de progreso antes de empezar
+            clearLogDOM();
             log('▶️ Solicitando publicación de todos los pendientes...', 'info');
 
             // Limpiar progreso anterior antes de nueva publicación
@@ -1197,6 +1334,18 @@ function renderWebUI(): void
             } catch (e) {
                 // Silencio
             }
+        }
+
+        /**
+         * Limpia el contenido del log en el DOM (sin mensajes residuales).
+         * Separado de clearLog() para que el antiguo clearLog() siga funcionando
+         * con su mensaje "Log limpiado" al ser llamado por el botón manual.
+         */
+        function clearLogDOM() {
+            logContainer.innerHTML = '';
+            // También resetear el contador de polling para que no intente
+            // mostrar entradas viejas de un archivo de progreso huérfano
+            pollProgress._shownCount = 0;
         }
 
         // ── Auto-refresh toggle ──
@@ -1278,7 +1427,12 @@ function renderWebUI(): void
 
         async function clearProgressSilent() {
             try {
-                await fetch('publish_to_wp.php?action=clear_progress');
+                const res = await fetch('publish_to_wp.php?action=clear_progress');
+                const data = await res.json();
+                // Confirmar que se limpió en el servidor
+                if (data.success) {
+                    pollProgress._shownCount = 0;
+                }
             } catch (e) {
                 // Silencio
             }
@@ -1344,6 +1498,172 @@ function renderWebUI(): void
 
         // Iniciar verificación al cargar
         checkActivePublishing();
+
+        // ────────────────────────────────────────────────────
+        // 🗜️ OPTIMIZAR ESPACIO EN DISCO
+        // ────────────────────────────────────────────────────
+
+        let optimizeData = [];
+
+        /**
+         * Carga la lista de cómics publicados con imágenes aún en disco.
+         */
+        async function loadOptimizeList() {
+            const tbody = document.getElementById('optimize-table-body');
+            const statsEl = document.getElementById('optimize-stats');
+            tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-gray-600">Cargando...</td></tr>';
+
+            try {
+                const res = await fetch('free_up_space.php?action=list&per_page=200');
+                const data = await res.json();
+
+                if (!data.success) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-red-400">Error: ${data.message}</td></tr>`;
+                    return;
+                }
+
+                optimizeData = data.comics || [];
+                statsEl.textContent = `${data.total} candidatos · ${data.espacio_formateado} recuperables`;
+
+                if (optimizeData.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-emerald-400">✨ ¡Todo limpio! No hay imágenes por liberar.</td></tr>';
+                    document.getElementById('btn-free-space').disabled = true;
+                    document.getElementById('optimize-select-all').checked = false;
+                    return;
+                }
+
+                tbody.innerHTML = optimizeData.map((c, i) => {
+                    const dirWarning = !c.dir_existe ? ' ⚠️' : '';
+                    return `
+                        <tr class="border-t border-gray-800 hover:bg-white/5 transition-colors">
+                            <td class="py-2 pr-2">
+                                <input type="checkbox" class="optimize-checkbox rounded" value="${c.id_fuente}" data-index="${i}">
+                            </td>
+                            <td class="py-2 pr-4 font-mono text-xs text-gray-400">${c.id_fuente}</td>
+                            <td class="py-2 pr-4 text-gray-300 max-w-xs truncate" title="${escapeHtml(c.titulo)}">${escapeHtml(c.titulo)}${dirWarning}</td>
+                            <td class="py-2 pr-4 text-gray-500 text-xs">${escapeHtml(c.universo || '-')}</td>
+                            <td class="py-2 pr-4 font-mono text-xs text-amber-400">${c.tamano_formateado}</td>
+                            <td class="py-2 pr-4 font-mono text-xs text-emerald-400">#${c.wp_post_id || '?'}</td>
+                        </tr>`;
+                }).join('');
+
+                updateFreeButton();
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-red-400">Error de conexión: ${e.message}</td></tr>`;
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function toggleSelectAll(checkbox) {
+            document.querySelectorAll('.optimize-checkbox').forEach(cb => {
+                cb.checked = checkbox.checked;
+            });
+            updateFreeButton();
+        }
+
+        function updateFreeButton() {
+            const checked = document.querySelectorAll('.optimize-checkbox:checked');
+            const btn = document.getElementById('btn-free-space');
+            const count = checked.length;
+
+            if (count === 0) {
+                btn.disabled = true;
+                btn.innerHTML = '🗑️ Liberar Espacio Seleccionado';
+                return;
+            }
+
+            // Sumar espacio de los seleccionados
+            let totalBytes = 0;
+            checked.forEach(cb => {
+                const idx = parseInt(cb.dataset.index);
+                if (optimizeData[idx]) {
+                    totalBytes += parseInt(optimizeData[idx].tamano_bytes) || 0;
+                }
+            });
+
+            btn.disabled = false;
+            const sizeText = formatBytes(totalBytes);
+            btn.innerHTML = `🗑️ Liberar ${count} cómics (${sizeText})`;
+        }
+
+        // Escuchar cambios en checkboxes individuales
+        document.addEventListener('change', function(e) {
+            if (e.target.classList.contains('optimize-checkbox')) {
+                updateFreeButton();
+                // Si se deselecciona uno, desmarcar "select all"
+                if (!e.target.checked) {
+                    document.getElementById('optimize-select-all').checked = false;
+                }
+                // Si todos están seleccionados, marcar "select all"
+                const all = document.querySelectorAll('.optimize-checkbox');
+                const checked = document.querySelectorAll('.optimize-checkbox:checked');
+                document.getElementById('optimize-select-all').checked = (all.length > 0 && checked.length === all.length);
+            }
+        });
+
+        async function freeSelectedSpace() {
+            const checked = document.querySelectorAll('.optimize-checkbox:checked');
+            if (checked.length === 0) return;
+
+            const ids = Array.from(checked).map(cb => cb.value);
+            const confirmMsg = `¿Liberar espacio de ${ids.length} cómics?\n\nSe eliminarán TODAS las imágenes del disco.\nLos registros en BD se conservan para evitar duplicados.\n\nEsta acción NO se puede deshacer.`;
+
+            if (!confirm(confirmMsg)) return;
+
+            const btn = document.getElementById('btn-free-space');
+            const resultEl = document.getElementById('optimize-result');
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Liberando...';
+            resultEl.classList.add('hidden');
+
+            try {
+                const formData = new FormData();
+                formData.append('action', 'free');
+                formData.append('ids', ids.join(','));
+
+                const res = await fetch('free_up_space.php', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    resultEl.classList.remove('hidden');
+                    resultEl.textContent = `✅ ${data.message}`;
+                    log(`🗜️ ${data.message}`, 'success');
+                } else {
+                    resultEl.classList.remove('hidden');
+                    resultEl.style.color = '#fca5a5';
+                    resultEl.textContent = `❌ ${data.message}`;
+                    log(`❌ Error al liberar espacio: ${data.message}`, 'error');
+                }
+            } catch (e) {
+                resultEl.classList.remove('hidden');
+                resultEl.style.color = '#fca5a5';
+                resultEl.textContent = `❌ Error: ${e.message}`;
+                log(`❌ Error al liberar espacio: ${e.message}`, 'error');
+            }
+
+            // Recargar la lista
+            await loadOptimizeList();
+            btn.disabled = true;
+            btn.innerHTML = '🗑️ Liberar Espacio Seleccionado';
+        }
+
+        function formatBytes(bytes) {
+            if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(2) + ' GB';
+            if (bytes >= 1048576) return (bytes / 1048576).toFixed(2) + ' MB';
+            if (bytes >= 1024) return (bytes / 1024).toFixed(2) + ' KB';
+            return bytes + ' B';
+        }
+
+        // Cargar lista al iniciar
+        loadOptimizeList();
         </script>
     </body>
     </html>

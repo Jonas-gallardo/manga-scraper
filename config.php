@@ -99,11 +99,47 @@ define('PUBLISH_BG_SCRIPT', __DIR__ . '/publish_background.php');
 define('PUBLISH_RATE_LIMIT_SECONDS', 1.5);
 
 // ── Delay between individual image uploads (DENTRO de uploadComicImages) ──
-// Se suma al rate limiter global. Total efectivo ≈ 2.5s entre imágenes.
-define('PUBLISH_DELAY_BETWEEN_IMAGES', 1000000);  // 1 second
+// MIN and MAX microseconds. A random value within this range is chosen per image.
+// Con PUBLISH_RATE_LIMIT_SECONDS=1.5s, el total efectivo es 2.0-3.5s entre imágenes,
+// lo cual evade el rate-limiting SSL de Banahosting al no ser un patrón fijo.
+define('PUBLISH_DELAY_IMAGES_MIN', 500000);   // 0.5 seconds
+define('PUBLISH_DELAY_IMAGES_MAX', 2000000);  // 2.0 seconds
 
 // ── Delay between publishing each comic in a batch (microseconds) ──
-define('PUBLISH_DELAY_BETWEEN_COMICS', 5000000);  // 5 seconds
+define('PUBLISH_DELAY_BETWEEN_COMICS', 10000000);  // 10 seconds
+
+// ── Consecutive SSL failure threshold: if N images in a row fail with SSL errors,
+//     pause for an extended backoff (2^failures * 10 seconds, capped at 120s).
+define('PUBLISH_MAX_CONSECUTIVE_SSL_FAILURES', 3);
+
+// ── cURL Keep-Alive (handle persistente para upload de imágenes) ──
+// WARNING: Habilitar esto puede causar ERR_CONNECTION_RESET en el servidor
+// durante lotes grandes. El handle persistente reutiliza sesiones SSL,
+// y cuando el servidor las purga (>5s idle), corrompe su stack SSL completo
+// impidiendo que NINGUNA conexión (ni siquiera fresh) funcione.
+// Solo habilitar si el hosting soporta keep-alive de muy larga duración.
+define('PERSISTENT_CURL_ENABLED', false);
+
+// ── Base64 Bridge para evadir WAF @validateByteRange 1-255 ──
+// Cuando está habilitado, las imágenes se codifican en base64 y se envían
+// como JSON al bridge wp-media-bridge.php en lugar de como binario directo
+// al REST API. Esto evade la regla del WAF Imunify360/ModSecurity que
+// bloquea bytes NULL (comunes en imágenes .webp) en peticiones POST.
+// El bridge decodifica el base64 y crea el attachment en WordPress.
+define('UPLOAD_USE_BRIDGE', true);
+define('UPLOAD_BRIDGE_ENDPOINT', '/wp-media-bridge.php');
+
+// ── SSL Meltdown Cooldown ──
+// Si una conexión FRESCA falla con errno 35 (Unknown SSL protocol error),
+// significa que el stack SSL del servidor colapsó. Se activa una pausa de
+// esta duración (segundos) para que el servidor se recupere.
+// 180 segundos = 3 minutos. Ajustar según el hosting.
+define('SSL_MELTDOWN_COOLDOWN_SECONDS', 180);
+
+// ── Batch audit logs: cada lote de publicación guarda un JSON completo con
+//     estadísticas, resultados por cómic, imágenes fallidas y timestamps,
+//     para auditoría post-mortem y diagnóstico de fallos recurrentes.
+define('PUBLISH_BATCH_LOG_DIR', __DIR__ . '/logs/batches');
 
 /**
  * Escanea un directorio y devuelve imágenes ordenadas.
