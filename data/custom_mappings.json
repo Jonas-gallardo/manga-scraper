@@ -1,4 +1,10 @@
 {
     "tags": {},
-    "universes": []
+    "universes": [],
+    "universe_mappings": {
+        "dexters laboratory": "dexter",
+        "adventure time": "hora de aventura",
+        "the simpsons": "los simpson",
+        "family guy": "padre de familia"
+    }
 }

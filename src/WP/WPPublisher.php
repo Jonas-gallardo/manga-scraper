@@ -946,6 +946,10 @@ class WPPublisher
             $payload['tipo'] = $taxPayload['tipo'];
         }
 
+        if (isset($taxPayload['autor']) && !empty($taxPayload['autor'])) {
+            $payload['autor'] = $taxPayload['autor'];
+        }
+
         return $payload;
     }
 

@@ -77,6 +77,7 @@ class WPTaxonomySync
             'personaje' => [],
             'idioma'    => [],
             'tipo'      => [],
+            'autor'     => [],
         ];
 
         // ── Idioma ──
@@ -112,8 +113,7 @@ class WPTaxonomySync
             foreach ($taxData['autores'] as $autor) {
                 $id = $this->syncTerm('autor', $autor);
                 if ($id !== null) {
-                    // Los autores no van en el payload final del post según la especificación
-                    // pero se registran en WordPress
+                    $result['autor'][] = $id;
                 }
             }
         }
@@ -210,6 +210,11 @@ class WPTaxonomySync
         // tipo: primer ID
         if (!empty($syncedIds['tipo'])) {
             $payload['tipo'] = $syncedIds['tipo'];
+        }
+
+        // autor: array de IDs
+        if (!empty($syncedIds['autor'])) {
+            $payload['autor'] = $syncedIds['autor'];
         }
 
         return $payload;

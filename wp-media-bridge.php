@@ -249,7 +249,7 @@ if ($action === 'create_post') {
     }
 
     // ── Taxonomías personalizadas ──
-    $customTaxonomies = ['universo', 'personaje', 'idioma', 'tipo'];
+    $customTaxonomies = ['universo', 'personaje', 'idioma', 'tipo', 'autor'];
     foreach ($customTaxonomies as $tax) {
         if (!empty($postData[$tax])) {
             $terms = is_array($postData[$tax]) ? $postData[$tax] : [$postData[$tax]];
@@ -277,6 +277,123 @@ if ($action === 'create_post') {
         'title' => $postArr['post_title'],
         'status' => $postArr['post_status'],
         'type' => $postArr['post_type'],
+    ]);
+    exit;
+}
+
+// ── Acción ensure_term: crear/buscar un término de taxonomía vía bridge ──
+// Evita que LiteSpeed/CGI borre el header Authorization en peticiones
+// a /wp-json/wp/v2/{taxonomy}, igual que create_post evade el problema
+// para /wp-json/wp/v2/posts.
+if ($action === 'ensure_term') {
+    $raw = file_get_contents('php://input');
+    $termData = json_decode($raw, true);
+
+    if (!is_array($termData) || empty($termData['taxonomy']) || empty($termData['name'])) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Missing required fields: taxonomy, name']));
+    }
+
+    $taxonomy = sanitize_text_field($termData['taxonomy']);
+    $termName = sanitize_text_field($termData['name']);
+    $termSlug = !empty($termData['slug']) ? sanitize_title($termData['slug']) : sanitize_title($termName);
+
+    // ── Verificar que la taxonomía existe ──
+    if (!taxonomy_exists($taxonomy)) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => "Taxonomy '{$taxonomy}' does not exist"]));
+    }
+
+    // ── Verificar si el término ya existe ──
+    $existing = term_exists($termName, $taxonomy);
+    if ($existing !== 0 && $existing !== null) {
+        $termId = is_array($existing) ? (int) $existing['term_id'] : (int) $existing;
+        header('Content-Type: application/json');
+        echo json_encode([
+            'id'       => $termId,
+            'name'     => $termName,
+            'slug'     => $termSlug,
+            'taxonomy' => $taxonomy,
+            'existing' => true,
+        ]);
+        exit;
+    }
+
+    // ── Crear el término ──
+    $result = wp_insert_term($termName, $taxonomy, ['slug' => $termSlug]);
+
+    if (is_wp_error($result)) {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => $result->get_error_message()]));
+    }
+
+    $termId = (int) $result['term_id'];
+    header('Content-Type: application/json');
+    echo json_encode([
+        'id'       => $termId,
+        'name'     => $termName,
+        'slug'     => $termSlug,
+        'taxonomy' => $taxonomy,
+        'existing' => false,
+    ]);
+    exit;
+}
+
+// ── Acción set_post_terms: asignar taxonomías a un post existente ──
+// Útil para reparar cómics publicados sin taxonomías (por bugs anteriores).
+// Recibe: { "post_id": 17709, "taxonomies": { "personaje": [123,456], "autor": [492] } }
+if ($action === 'set_post_terms') {
+    $raw = file_get_contents('php://input');
+    $input = json_decode($raw, true);
+
+    if (!is_array($input) || empty($input['post_id']) || empty($input['taxonomies'])) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Missing required fields: post_id, taxonomies']));
+    }
+
+    $postId = (int) $input['post_id'];
+    $taxonomies = $input['taxonomies'];
+
+    // Verificar que el post existe
+    $post = get_post($postId);
+    if (!$post) {
+        http_response_code(404);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => "Post ID {$postId} not found"]));
+    }
+
+    $results = [];
+    foreach ($taxonomies as $taxonomy => $termIds) {
+        if (!is_array($termIds) || empty($termIds)) {
+            continue;
+        }
+
+        if (!taxonomy_exists($taxonomy)) {
+            $results[$taxonomy] = ['error' => "Taxonomy '{$taxonomy}' does not exist"];
+            continue;
+        }
+
+        $intIds = array_map('intval', $termIds);
+        $result = wp_set_post_terms($postId, $intIds, $taxonomy, false);
+
+        if (is_wp_error($result)) {
+            $results[$taxonomy] = ['error' => $result->get_error_message()];
+        } elseif (is_array($result)) {
+            $results[$taxonomy] = ['assigned' => count($result), 'ids' => $result];
+        } else {
+            $results[$taxonomy] = ['assigned' => 0];
+        }
+    }
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success'    => true,
+        'post_id'    => $postId,
+        'results'    => $results,
     ]);
     exit;
 }

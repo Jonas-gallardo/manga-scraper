@@ -191,23 +191,143 @@ function calcular_tamano_dir(string $dir): int {
     return $size;
 }
 
+// ── WebP Conversion Timeout (seconds) ──
+// Tiempo máximo por imagen individual. Si cwebp se cuelga con una imagen
+// corrupta, se mata el proceso y se salta esa imagen. Evita que el batch
+// entero se quede pegado indefinidamente.
+define('WEBP_TIMEOUT_PER_IMAGE', 15);
+
+// Tiempo máximo total para convertir un cómic entero (se ignora si es 0).
+// Si el cómic tiene 34 imágenes y cada una toma 15s, el timeout total
+// sería 34 × 15 = 510s. Con 120s de margen extra para copias de archivos.
+// Un valor de 0 deshabilita el timeout total.
+define('WEBP_TIMEOUT_TOTAL_COMIC', 0);
+
+// Máximo de fallos consecutivos antes de abortar la conversión del cómic.
+// Si fallan 5 imágenes seguidas, asumimos que cwebp no está disponible
+// y guardamos las imágenes originales tal cual.
+define('WEBP_MAX_CONSECUTIVE_FAILS', 5);
+
+/**
+ * Ejecuta un comando con timeout usando proc_open.
+ * Más seguro que exec() porque no se cuelga si el proceso hijo se bloquea.
+ *
+ * @param string $command Comando a ejecutar (ya escapado)
+ * @param int $timeout_seconds Tiempo máximo en segundos
+ * @return array{exit_code: int, stdout: string, stderr: string}
+ */
+function ejecutar_con_timeout(string $command, int $timeout_seconds = 15): array {
+    $descriptors = [
+        0 => ['pipe', 'r'],  // stdin
+        1 => ['pipe', 'w'],  // stdout
+        2 => ['pipe', 'w'],  // stderr
+    ];
+
+    $process = proc_open($command, $descriptors, $pipes);
+
+    if (!is_resource($process)) {
+        return ['exit_code' => -1, 'stdout' => '', 'stderr' => 'proc_open failed'];
+    }
+
+    // Cerrar stdin inmediatamente
+    fclose($pipes[0]);
+
+    // Establecer pipes como no bloqueantes
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+
+    $stdout = '';
+    $stderr = '';
+    $start_time = time();
+    $timed_out = false;
+
+    while (true) {
+        $status = proc_get_status($process);
+
+        if (!$status['running']) {
+            // Proceso terminó — leer lo que quede
+            $stdout .= stream_get_contents($pipes[1]);
+            $stderr .= stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($process);
+            return [
+                'exit_code' => $status['exitcode'],
+                'stdout'    => $stdout,
+                'stderr'    => $stderr,
+            ];
+        }
+
+        // Timeout check
+        if ((time() - $start_time) >= $timeout_seconds) {
+            $timed_out = true;
+            break;
+        }
+
+        // Leer fragmentos disponibles
+        $read = [$pipes[1], $pipes[2]];
+        $write = null;
+        $except = null;
+        $changed = stream_select($read, $write, $except, 0, 200000); // 200ms poll
+
+        if ($changed > 0) {
+            foreach ($read as $pipe) {
+                $data = fread($pipe, 8192);
+                if ($data === false || $data === '') continue;
+                if ($pipe === $pipes[1]) {
+                    $stdout .= $data;
+                } else {
+                    $stderr .= $data;
+                }
+            }
+        }
+    }
+
+    // ── Timeout: matar el proceso ──
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+
+    if (isset($status) && $status['running']) {
+        // SIGTERM primero
+        proc_terminate($process, 15);
+        usleep(500000); // 500ms grace
+
+        $status = proc_get_status($process);
+        if ($status['running']) {
+            // SIGKILL
+            proc_terminate($process, 9);
+            usleep(100000);
+        }
+    }
+
+    proc_close($process);
+
+    return [
+        'exit_code' => -2,  // -2 = timeout
+        'stdout'    => $stdout,
+        'stderr'    => $stderr . "\n[TIMEOUT tras {$timeout_seconds}s]",
+    ];
+}
+
 /**
  * Convierte TODAS las imágenes de un directorio de cómic a WebP.
- * Usa PHP GD (imagewebp) como método principal — más fiable con rutas UTF-8,
- * caracteres especiales y permisos. Fallback a cwebp CLI si GD no está disponible.
+ * Usa cwebp CLI con proc_open + timeout para evitar bloqueos.
+ * Si cwebp falla consecutivamente N veces, se aborta la conversión del cómic
+ * y se conservan las imágenes originales.
  *
  * @param string $dir_path Ruta absoluta del directorio del cómic
  * @param int $quality Calidad WebP (1-100), default 85
- * @return array{converted: int, skipped: int, failed: int, bytes_original: int, bytes_webp: int, bytes_ahorrados: int}
+ * @return array{converted: int, skipped: int, failed: int, bytes_original: int, bytes_webp: int, bytes_ahorrados: int, aborted: bool}
  */
 function convertir_comic_a_webp(string $dir_path, int $quality = 85): array {
     $stats = [
-        'converted'      => 0,
-        'skipped'        => 0,
-        'failed'         => 0,
-        'bytes_original' => 0,
-        'bytes_webp'     => 0,
+        'converted'       => 0,
+        'skipped'         => 0,
+        'failed'          => 0,
+        'bytes_original'  => 0,
+        'bytes_webp'      => 0,
         'bytes_ahorrados' => 0,
+        'aborted'         => false,
     ];
 
     if (!is_dir($dir_path)) {
@@ -237,7 +357,25 @@ function convertir_comic_a_webp(string $dir_path, int $quality = 85): array {
 
     natsort($files);
 
+    $consecutive_fails = 0;
+    $total_start_time  = time();
+    $timeout_per_image = defined('WEBP_TIMEOUT_PER_IMAGE') ? WEBP_TIMEOUT_PER_IMAGE : 15;
+    $max_consecutive   = defined('WEBP_MAX_CONSECUTIVE_FAILS') ? WEBP_MAX_CONSECUTIVE_FAILS : 5;
+    $total_timeout     = defined('WEBP_TIMEOUT_TOTAL_COMIC') ? WEBP_TIMEOUT_TOTAL_COMIC : 0;
+
     foreach ($files as $filepath) {
+        // ── Guarda contra timeout total del cómic ──
+        if ($total_timeout > 0 && (time() - $total_start_time) >= $total_timeout) {
+            $stats['aborted'] = true;
+            break;
+        }
+
+        // ── Guarda contra fallos consecutivos ──
+        if ($consecutive_fails >= $max_consecutive) {
+            $stats['aborted'] = true;
+            break;
+        }
+
         $info = pathinfo($filepath);
         $filename_no_ext = $info['filename'];
         $webp_path = $info['dirname'] . '/' . $filename_no_ext . '.webp';
@@ -249,80 +387,100 @@ function convertir_comic_a_webp(string $dir_path, int $quality = 85): array {
             $webp_size = @filesize($webp_path);
             $stats['bytes_original'] += $orig_size ?: 0;
             $stats['bytes_webp'] += $webp_size ?: 0;
-            @unlink($filepath); // Borrar original duplicado
+            @unlink($filepath);
+            $consecutive_fails = 0; // reset porque esto no es un fallo
             continue;
         }
 
         $original_size = @filesize($filepath);
         if ($original_size === false || $original_size === 0) {
             $stats['failed']++;
+            $consecutive_fails++;
             continue;
         }
 
         $exito = false;
 
-        // ── CONVERSIÓN A WebP ──
-        // Usamos cwebp CLI vía temp para evitar dos problemas:
-        //   1. XAMPP (Apache) tiene libstdc++ antigua que rompe cwebp →
-        //      se soluciona con LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
-        //   2. cwebp no puede escribir en rutas con caracteres UTF-8 →
-        //      se escribe a /tmp y luego se copia con PHP
-        //   3. PHP GD no tiene imagewebp() disponible en este servidor
+        // ── CONVERSIÓN A WebP vía cwebp CLI con timeout ──
+        // PROBLEMA: cwebp no puede abrir archivos en rutas con caracteres UTF-8
+        //   (ej. 「｜」U+FF5C, acentos, kanji, etc.). La ruta se pasa con
+        //   escapeshellarg() pero cwebp internamente no soporta UTF-8 en paths.
         //
-        // Estrategia: escribir a temp (ASCII), luego file_get_contents + file_put_contents
+        // SOLUCIÓN: Copiar el archivo original a /tmp (ASCII), ejecutar cwebp
+        //   sobre el temp, y luego copiar el WebP resultante al destino UTF-8
+        //   usando PHP. Esto evita que cwebp tenga que tocar paths no-ASCII.
 
-        $temp_webp = sys_get_temp_dir() . '/' . uniqid('cwebp_', true) . '.webp';
+        $temp_input = sys_get_temp_dir() . '/' . uniqid('cwebp_in_', true);
+        $temp_webp  = sys_get_temp_dir() . '/' . uniqid('cwebp_out_', true) . '.webp';
 
-        // ── Intento 1: cwebp con LD_LIBRARY_PATH (para XAMPP/Apache) ──
+        // Copiar archivo original a temp ASCII (PHP maneja UTF-8 nativamente)
+        if (!@copy($filepath, $temp_input)) {
+            $stats['failed']++;
+            $consecutive_fails++;
+            @unlink($temp_input);
+            @unlink($temp_webp);
+            continue;
+        }
+
+        // ── Intento 1: cwebp con LD_LIBRARY_PATH ──
         $cmd1 = sprintf(
             'LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu cwebp -q %d %s -o %s 2>/dev/null',
             $quality,
-            escapeshellarg($filepath),
+            escapeshellarg($temp_input),
             escapeshellarg($temp_webp)
         );
-        $ret1 = -1;
-        exec($cmd1, $out1, $ret1);
+        $result1 = ejecutar_con_timeout($cmd1, $timeout_per_image);
 
-        // ── Intento 2: cwebp sin LD_LIBRARY_PATH (para CLI, si el primero falló) ──
-        if ($ret1 !== 0 || !file_exists($temp_webp) || filesize($temp_webp) === 0) {
+        $intento1_ok = ($result1['exit_code'] === 0 && file_exists($temp_webp) && @filesize($temp_webp) > 0);
+
+        // ── Intento 2: cwebp sin LD_LIBRARY_PATH (fallback) ──
+        if (!$intento1_ok) {
+            if (file_exists($temp_webp)) @unlink($temp_webp);
+
             $cmd2 = sprintf(
                 'cwebp -q %d %s -o %s 2>/dev/null',
                 $quality,
-                escapeshellarg($filepath),
+                escapeshellarg($temp_input),
                 escapeshellarg($temp_webp)
             );
-            $ret2 = -1;
-            exec($cmd2, $out2, $ret2);
+            $result2 = ejecutar_con_timeout($cmd2, $timeout_per_image);
 
-            // Si ambos fallaron, limpiar temp
-            if (($ret2 !== 0 || !file_exists($temp_webp) || filesize($temp_webp) === 0)) {
+            $intento2_ok = ($result2['exit_code'] === 0 && file_exists($temp_webp) && @filesize($temp_webp) > 0);
+
+            if (!$intento2_ok) {
                 if (file_exists($temp_webp)) @unlink($temp_webp);
             }
         }
 
-        // ── Copiar desde temp al destino final ──
-        if (file_exists($temp_webp) && filesize($temp_webp) > 0) {
+        // ── Copiar desde temp al destino final (PHP maneja UTF-8 nativamente) ──
+        if (file_exists($temp_webp) && @filesize($temp_webp) > 0) {
             $webp_data = @file_get_contents($temp_webp);
-            if ($webp_data !== false) {
+            if ($webp_data !== false && strlen($webp_data) > 0) {
                 $escrito = @file_put_contents($webp_path, $webp_data);
-                if ($escrito !== false && file_exists($webp_path) && filesize($webp_path) > 0) {
+                if ($escrito !== false && file_exists($webp_path) && @filesize($webp_path) > 0) {
                     $exito = true;
                 }
             }
-            @unlink($temp_webp);
         }
+
+        // Limpiar temporales siempre
+        @unlink($temp_input);
+        @unlink($temp_webp);
 
         if ($exito) {
             $webp_size = @filesize($webp_path) ?: 0;
             $stats['converted']++;
             $stats['bytes_original'] += $original_size;
             $stats['bytes_webp'] += $webp_size;
+            $consecutive_fails = 0; // reset contador
 
             // Eliminar el archivo original pesado
             @unlink($filepath);
         } else {
             $stats['failed']++;
-            // Si falló pero dejó un archivo basura, limpiarlo
+            $consecutive_fails++;
+
+            // Limpiar archivo basura si se creó
             if (file_exists($webp_path)) {
                 @unlink($webp_path);
             }

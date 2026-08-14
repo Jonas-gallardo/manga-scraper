@@ -359,61 +359,85 @@ function extraer_valores_seccion(DOMXPath $xpath, string $sectionLabel): array {
 }
 
 /**
- * Extrae tags/etiquetas del cómic — AHORA solo extrae de la sección "Etiquetas:".
+ * Extrae valores de una sección intentando múltiples labels (español + inglés).
+ * Útil porque 3hentai.net puede servir HTML con labels en español o inglés
+ * dependiendo de headers, IP, o configuración del servidor.
+ *
+ * @param DOMXPath $xpath
+ * @param array<string> $labels Labels a intentar en orden (ej. ['Etiquetas:', 'Tags:'])
+ * @return array<string> Valores encontrados
+ */
+function extraer_valores_seccion_multi(DOMXPath $xpath, array $labels): array {
+    foreach ($labels as $label) {
+        $result = extraer_valores_seccion($xpath, $label);
+        if (!empty($result)) {
+            return $result;
+        }
+    }
+    return [];
+}
+
+/**
+ * Extrae tags/etiquetas del cómic.
+ * Soporta etiquetas en español (Etiquetas:) e inglés (Tags:).
  */
 function extraer_tags(DOMXPath $xpath, string $html): ?string {
     // 1 — meta name="keywords"
     $kw = extraer_meta($xpath, 'keywords');
     if ($kw) return $kw;
-    // 2 — Extraer solo de la sección "Etiquetas:" del HTML estructurado
-    $tags = extraer_valores_seccion($xpath, 'Etiquetas:');
+    // 2 — Extraer de la sección "Etiquetas:" o "Tags:" del HTML estructurado
+    $tags = extraer_valores_seccion_multi($xpath, ['Etiquetas:', 'Tags:']);
     if (!empty($tags)) return implode(', ', array_unique($tags));
     return null;
 }
 
 /**
  * Extrae la serie/universo del cómic desde la sección "Series:".
+ * Soporta español e inglés.
  *
  * @param DOMXPath $xpath
  * @return string|null Nombre(s) de serie separados por coma, o null
  */
 function extraer_series(DOMXPath $xpath): ?string {
-    $values = extraer_valores_seccion($xpath, 'Series:');
+    $values = extraer_valores_seccion_multi($xpath, ['Series:', 'Parodies:']);
     return !empty($values) ? implode(', ', array_unique($values)) : null;
 }
 
 /**
  * Extrae los personajes del cómic desde la sección "Personajes:".
+ * Soporta español (Personajes:) e inglés (Characters:).
  *
  * @param DOMXPath $xpath
  * @return string|null Nombres de personajes separados por coma, o null
  */
 function extraer_personajes(DOMXPath $xpath): ?string {
-    $values = extraer_valores_seccion($xpath, 'Personajes:');
+    $values = extraer_valores_seccion_multi($xpath, ['Personajes:', 'Characters:']);
     return !empty($values) ? implode(', ', array_unique($values)) : null;
 }
 
 /**
  * Extrae los artistas / autores del cómic desde la sección "Artistas:".
- * En el sitio de origen se llaman "Artistas", pero en WordPress se
+ * Soporta español (Artistas:) e inglés (Artists:).
+ * En el sitio de origen se llaman "Artistas"/"Artists", pero en WordPress se
  * asignarán a la taxonomía "autor".
  *
  * @param DOMXPath $xpath
  * @return string|null Nombres de artistas separados por coma, o null
  */
 function extraer_artistas(DOMXPath $xpath): ?string {
-    $values = extraer_valores_seccion($xpath, 'Artistas:');
+    $values = extraer_valores_seccion_multi($xpath, ['Artistas:', 'Artists:']);
     return !empty($values) ? implode(', ', array_unique($values)) : null;
 }
 
 /**
  * Extrae la categoría del cómic desde la sección "Categorías:".
+ * Soporta español (Categorías:) e inglés (Categories:).
  *
  * @param DOMXPath $xpath
  * @return string|null Nombre(s) de categoría separados por coma, o null
  */
 function extraer_categorias(DOMXPath $xpath): ?string {
-    $values = extraer_valores_seccion($xpath, 'Categorías:');
+    $values = extraer_valores_seccion_multi($xpath, ['Categorías:', 'Categories:']);
     return !empty($values) ? implode(', ', array_unique($values)) : null;
 }
 
@@ -435,20 +459,19 @@ function extraer_sinopsis(DOMXPath $xpath, string $html): ?string {
 
 /**
  * Extrae idioma del cómic.
- * AHORA también verifica la sección "Idiomas:" del HTML estructurado.
+ *
+ * PRIORIDAD CORREGIDA: La sección "Idiomas:" / "Languages:" del HTML contiene
+ * el idioma REAL del cómic (ej. "English"). <html lang> y <meta language>
+ * reflejan el idioma de la INTERFAZ del sitio origen, NO del contenido.
+ * Por eso el orden correcto es:
+ *   1. Sección "Idiomas:" / "Languages:" (idioma real del cómic)
+ *   2. <meta name="language"> (fallback)
+ *   3. <html lang="..."> (último recurso)
  */
 function extraer_idioma(DOMXPath $xpath, string $html): ?string {
-    // 1 — <html lang="...">
-    $nodes = $xpath->query('//html/@lang');
-    if ($nodes && $nodes->length > 0) {
-        $lang = trim($nodes->item(0)->value);
-        if ($lang !== '') return $lang;
-    }
-    // 2 — meta name="language"
-    $lang = extraer_meta($xpath, 'language');
-    if ($lang) return $lang;
-    // 3 — Extraer de la sección "Idiomas:" filtrando "translated"
-    $idiomas = extraer_valores_seccion($xpath, 'Idiomas:');
+    // 1 — Extraer de la sección "Idiomas:" o "Languages:" filtrando "translated"
+    //     Este es el idioma REAL del cómic, NO de la interfaz del sitio.
+    $idiomas = extraer_valores_seccion_multi($xpath, ['Idiomas:', 'Languages:']);
     if (!empty($idiomas)) {
         $realLang = array_filter($idiomas, function($v) {
             return mb_strtolower(trim($v), 'UTF-8') !== 'translated';
@@ -456,6 +479,15 @@ function extraer_idioma(DOMXPath $xpath, string $html): ?string {
         if (!empty($realLang)) {
             return implode(', ', array_unique($realLang));
         }
+    }
+    // 2 — meta name="language" (fallback)
+    $lang = extraer_meta($xpath, 'language');
+    if ($lang) return $lang;
+    // 3 — <html lang="..."> (último recurso — puede ser el idioma de la UI, no del cómic)
+    $nodes = $xpath->query('//html/@lang');
+    if ($nodes && $nodes->length > 0) {
+        $lang = trim($nodes->item(0)->value);
+        if ($lang !== '') return $lang;
     }
     return null;
 }
@@ -1227,28 +1259,47 @@ if ($action === 'single') {
             'type'    => 'info',
             'message' => "🔄 Convirtiendo imágenes a WebP al 85% de calidad..."
         ]);
-        $webp_stats = convertir_comic_a_webp($dir_path, 85);
-        if ($webp_stats['converted'] > 0) {
-            $ahorro = $webp_stats['bytes_ahorrados'];
-            $ahorro_formateado = ($ahorro >= 1073741824) ? number_format($ahorro / 1073741824, 2) . ' GB'
-                               : (($ahorro >= 1048576)    ? number_format($ahorro / 1048576, 2) . ' MB'
-                               : number_format($ahorro / 1024, 2) . ' KB');
-            send_progress([
-                'type'    => 'success',
-                'message' => "✅ WebP: {$webp_stats['converted']} imágenes convertidas, ahorrado {$ahorro_formateado}"
-            ]);
-        } elseif ($webp_stats['skipped'] > 0) {
-            send_progress([
-                'type'    => 'success',
-                'message' => "✅ WebP: {$webp_stats['skipped']} imágenes ya estaban en WebP"
-            ]);
-        }
-        if ($webp_stats['failed'] > 0) {
+        try {
+            $webp_stats = convertir_comic_a_webp($dir_path, 85);
+
+            // Reportar aborto por fallos consecutivos
+            if (!empty($webp_stats['aborted'])) {
+                send_progress([
+                    'type'    => 'warning',
+                    'message' => "⚠️ WebP: conversión abortada tras {$webp_stats['failed']} fallos consecutivos. Se conservan las imágenes originales."
+                ]);
+                log_to_db($pdo, $id, 'warning', "WebP: abortada — {$webp_stats['failed']} fallos, {$webp_stats['converted']} convertidas");
+            }
+
+            if ($webp_stats['converted'] > 0) {
+                $ahorro = $webp_stats['bytes_ahorrados'];
+                $ahorro_formateado = ($ahorro >= 1073741824) ? number_format($ahorro / 1073741824, 2) . ' GB'
+                                   : (($ahorro >= 1048576)    ? number_format($ahorro / 1048576, 2) . ' MB'
+                                   : number_format($ahorro / 1024, 2) . ' KB');
+                send_progress([
+                    'type'    => 'success',
+                    'message' => "✅ WebP: {$webp_stats['converted']} imágenes convertidas, ahorrado {$ahorro_formateado}"
+                ]);
+            } elseif ($webp_stats['skipped'] > 0) {
+                send_progress([
+                    'type'    => 'success',
+                    'message' => "✅ WebP: {$webp_stats['skipped']} imágenes ya estaban en WebP"
+                ]);
+            }
+            if ($webp_stats['failed'] > 0 && empty($webp_stats['aborted'])) {
+                send_progress([
+                    'type'    => 'warning',
+                    'message' => "⚠️ WebP: {$webp_stats['failed']} imágenes fallaron en la conversión"
+                ]);
+                log_to_db($pdo, $id, 'warning', "WebP: {$webp_stats['failed']} fallos de conversión");
+            }
+        } catch (Throwable $e) {
             send_progress([
                 'type'    => 'warning',
-                'message' => "⚠️ WebP: {$webp_stats['failed']} imágenes fallaron en la conversión"
+                'message' => "⚠️ WebP: error inesperado durante la conversión — " . $e->getMessage() . ". Se conservan las imágenes originales."
             ]);
-            log_to_db($pdo, $id, 'warning', "WebP: {$webp_stats['failed']} fallos de conversión");
+            log_to_db($pdo, $id, 'error', "WebP: excepción — " . $e->getMessage());
+            log_to_file("WebP exception ID $id: " . $e->getMessage());
         }
     }
 
@@ -1605,27 +1656,47 @@ if ($action === 'batch') {
                 'type'    => 'info',
                 'message' => "🔄 Convirtiendo imágenes a WebP al 85%..."
             ]);
-            $webp_stats = convertir_comic_a_webp($dir_path, 85);
-            if ($webp_stats['converted'] > 0) {
-                $ahorro = $webp_stats['bytes_ahorrados'];
-                $ahorro_formateado = ($ahorro >= 1073741824) ? number_format($ahorro / 1073741824, 2) . ' GB'
-                                   : (($ahorro >= 1048576)    ? number_format($ahorro / 1048576, 2) . ' MB'
-                                   : number_format($ahorro / 1024, 2) . ' KB');
-                send_progress([
-                    'type'    => 'success',
-                    'message' => "✅ WebP: {$webp_stats['converted']} imágenes, ahorrado {$ahorro_formateado}"
-                ]);
-            } elseif ($webp_stats['skipped'] > 0) {
-                send_progress([
-                    'type'    => 'success',
-                    'message' => "✅ WebP: {$webp_stats['skipped']} imágenes ya en WebP"
-                ]);
-            }
-            if ($webp_stats['failed'] > 0) {
+            try {
+                $webp_stats = convertir_comic_a_webp($dir_path, 85);
+
+                // Reportar aborto por fallos consecutivos
+                if (!empty($webp_stats['aborted'])) {
+                    send_progress([
+                        'type'    => 'warning',
+                        'message' => "⚠️ WebP: conversión abortada tras {$webp_stats['failed']} fallos consecutivos. Se conservan las imágenes originales."
+                    ]);
+                    log_to_db($pdo, $id, 'warning', "WebP: abortada batch — {$webp_stats['failed']} fallos, {$webp_stats['converted']} convertidas");
+                }
+
+                if ($webp_stats['converted'] > 0) {
+                    $ahorro = $webp_stats['bytes_ahorrados'];
+                    $ahorro_formateado = ($ahorro >= 1073741824) ? number_format($ahorro / 1073741824, 2) . ' GB'
+                                       : (($ahorro >= 1048576)    ? number_format($ahorro / 1048576, 2) . ' MB'
+                                       : number_format($ahorro / 1024, 2) . ' KB');
+                    send_progress([
+                        'type'    => 'success',
+                        'message' => "✅ WebP: {$webp_stats['converted']} imágenes, ahorrado {$ahorro_formateado}"
+                    ]);
+                } elseif ($webp_stats['skipped'] > 0) {
+                    send_progress([
+                        'type'    => 'success',
+                        'message' => "✅ WebP: {$webp_stats['skipped']} imágenes ya en WebP"
+                    ]);
+                }
+                if ($webp_stats['failed'] > 0 && empty($webp_stats['aborted'])) {
+                    send_progress([
+                        'type'    => 'warning',
+                        'message' => "⚠️ WebP: {$webp_stats['failed']} fallos de conversión"
+                    ]);
+                }
+            } catch (Throwable $e) {
                 send_progress([
                     'type'    => 'warning',
-                    'message' => "⚠️ WebP: {$webp_stats['failed']} fallos de conversión"
+                    'message' => "⚠️ WebP: error inesperado — " . $e->getMessage() . ". Se conservan las imágenes originales. Continuando..."
                 ]);
+                log_to_db($pdo, $id, 'error', "WebP: excepción batch — " . $e->getMessage());
+                log_to_file("WebP exception batch ID $id: " . $e->getMessage());
+                // No interrumpir el batch — el cómic se guarda con sus imágenes originales
             }
         }
 

@@ -104,7 +104,17 @@ function convertir_todos(PDO $pdo, int $quality, bool $is_web = false): array {
             continue;
         }
 
-        $stats = convertir_comic_a_webp($comic['ruta_carpeta'], $quality);
+        try {
+            $stats = convertir_comic_a_webp($comic['ruta_carpeta'], $quality);
+        } catch (Throwable $e) {
+            echo "❌ Excepción: " . $e->getMessage() . "\n";
+            $errores++;
+            continue;
+        }
+
+        if (!empty($stats['aborted'])) {
+            echo "⚠️  Abortada tras {$stats['failed']} fallos consecutivos\n";
+        }
 
         if ($stats['converted'] > 0) {
             $ahorro = $stats['bytes_ahorrados'];
@@ -177,7 +187,14 @@ function convertir_por_id(PDO $pdo, int $id, int $quality, bool $is_web = false)
         return ['message' => $msg];
     }
 
-    $stats = convertir_comic_a_webp($comic['ruta_carpeta'], $quality);
+    try {
+        $stats = convertir_comic_a_webp($comic['ruta_carpeta'], $quality);
+    } catch (Throwable $e) {
+        $msg = "Error en conversión: " . $e->getMessage();
+        if ($is_web) return ['message' => $msg, 'stats' => ['converted' => 0, 'skipped' => 0, 'failed' => 0, 'bytes_ahorrados' => 0, 'aborted' => false]];
+        echo "❌ $msg\n";
+        return ['message' => $msg, 'stats' => ['converted' => 0, 'skipped' => 0, 'failed' => 0, 'bytes_ahorrados' => 0, 'aborted' => false]];
+    }
 
     // Actualizar tamano_bytes en BD
     $nuevo_tamano = calcular_tamano_dir($comic['ruta_carpeta']);

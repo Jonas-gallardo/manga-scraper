@@ -30,6 +30,14 @@ class UniverseProcessor
     private array $existingUniverses;
 
     /**
+     * Mapa de equivalencias: nombre en inglés (origen) → nombre canónico en WordPress.
+     * Cargado desde data/custom_mappings.json (clave "universe_mappings").
+     *
+     * @var array<string, string>  normalized_source_key => canonical_target
+     */
+    private array $universeMappings = [];
+
+    /**
      * Umbral de similitud para fuzzy matching (0.0 - 1.0).
      *
      * @var float
@@ -44,14 +52,25 @@ class UniverseProcessor
         $this->existingUniverses = TaxonomyData::getUniversesNormalized();
         $this->fuzzyThreshold = $fuzzyThreshold;
 
-        // ── Cargar universos personalizados desde data/custom_mappings.json ──
+        // ── Cargar configuraciones personalizadas desde data/custom_mappings.json ──
         $customFile = __DIR__ . '/../data/custom_mappings.json';
         if (file_exists($customFile)) {
             $customData = json_decode(file_get_contents($customFile), true);
-            if (is_array($customData) && isset($customData['universes'])) {
-                foreach ($customData['universes'] as $univName) {
-                    $key = TaxonomyData::normalizeForSearch($univName);
-                    $this->existingUniverses[$key] = $univName;
+            if (is_array($customData)) {
+                // Universos adicionales (nuevos universos no existentes en WordPress)
+                if (isset($customData['universes'])) {
+                    foreach ($customData['universes'] as $univName) {
+                        $key = TaxonomyData::normalizeForSearch($univName);
+                        $this->existingUniverses[$key] = $univName;
+                    }
+                }
+                // Mapa de equivalencias: nombre scraping → nombre canónico WordPress
+                // (ej: "adventure time" → "hora de aventura")
+                if (isset($customData['universe_mappings']) && is_array($customData['universe_mappings'])) {
+                    foreach ($customData['universe_mappings'] as $sourceName => $targetName) {
+                        $key = TaxonomyData::normalizeForSearch($sourceName);
+                        $this->universeMappings[$key] = mb_strtolower($targetName, 'UTF-8');
+                    }
                 }
             }
         }
@@ -222,6 +241,13 @@ class UniverseProcessor
         // ── 0. Validar longitud mínima para fuzzy matching ──
         // Strings de 1-2 caracteres NO deben hacer fuzzy match (evita "k"→"Attack On Titan")
         $keyLength = strlen($searchKey);
+
+        // ── 0.5. Mapa de equivalencias: scraping name → canonical WordPress name ──
+        // Resuelve traducciones inglés→español (ej: "adventure time" → "hora de aventura")
+        // y abreviaciones (ej: "dexters laboratory" → "dexter")
+        if (isset($this->universeMappings[$searchKey])) {
+            return $this->universeMappings[$searchKey];
+        }
 
         // ── 1. Búsqueda exacta normalizada ──
         if (isset($this->existingUniverses[$searchKey])) {

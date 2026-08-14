@@ -522,6 +522,16 @@ class WPClient
      */
     public function ensureTermExists(string $taxonomy, string $termName): int
     {
+        // ── Si el bridge está activo, delegar completamente en él ──
+        // En entornos LiteSpeed/CGI, el header Authorization es eliminado
+        // en la REST API, causando HTTP 401 en POST. El bridge evade esto
+        // usando wp_insert_term() / term_exists() directamente en WP.
+        $useBridge = defined('UPLOAD_USE_BRIDGE') && UPLOAD_USE_BRIDGE;
+        if ($useBridge) {
+            return $this->ensureTermViaBridge($taxonomy, $termName);
+        }
+
+        // ── Fallback: REST API directa (funciona en entornos sin LiteSpeed) ──
         // 1. Obtener el endpoint correcto según la taxonomía
         //    WordPress REST API usa /wp/v2/tags para post_tag (no /wp/v2/post_tag)
         $endpoint = '/wp-json/wp/v2/' . $this->getTaxonomyEndpoint($taxonomy);
@@ -704,6 +714,158 @@ class WPClient
         $this->stats['success']++;
         $this->stats['posts_created']++;
 
+        return $decoded;
+    }
+
+    /**
+     * Crea o busca un término de taxonomía en WordPress usando el bridge.
+     *
+     * En entornos LiteSpeed/CGI, el header Authorization es eliminado
+     * en peticiones a /wp-json/wp/v2/{taxonomy}, causando HTTP 401.
+     * Esta ruta alternativa evade ese problema usando el bridge,
+     * que autentica correctamente y usa wp_insert_term() / term_exists()
+     * directamente dentro de WordPress.
+     *
+     * @param string $taxonomy Slug de la taxonomía (ej: 'personaje', 'post_tag')
+     * @param string $termName Nombre del término
+     * @return int ID numérico del término en WordPress
+     * @throws RuntimeException Si falla la operación
+     */
+    public function ensureTermViaBridge(string $taxonomy, string $termName): int
+    {
+        $this->stats['requests']++;
+
+        $bridgeUrl = rtrim($this->baseUrl, '/') . '/wp-media-bridge.php?action=ensure_term';
+
+        $payload = [
+            'taxonomy' => $taxonomy,
+            'name'     => $termName,
+            'slug'     => $this->sanitizeSlug($termName),
+        ];
+
+        $ch = curl_init($bridgeUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => [
+                $this->authHeader,
+                'Content-Type: application/json',
+                'Cache-Control: no-cache',
+            ],
+            CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+            CURLOPT_TIMEOUT        => $this->timeout,
+            CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_USERAGENT      => 'ComicScraperPro/1.0',
+            CURLOPT_FORBID_REUSE   => true,
+            CURLOPT_FRESH_CONNECT  => true,
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error    = curl_error($ch);
+        curl_close($ch);
+
+        if ($response === false || $httpCode < 200 || $httpCode >= 300) {
+            $this->stats['errors']++;
+            $errorMsg = $error ?: "HTTP {$httpCode}";
+            $detail = '';
+            if ($response) {
+                $decoded = json_decode($response, true);
+                if (is_array($decoded) && isset($decoded['error'])) {
+                    $detail = ' - ' . $decoded['error'];
+                } else {
+                    $detail = ' - ' . substr($response, 0, 300);
+                }
+            }
+            throw new RuntimeException(
+                "Error asegurando término vía bridge '{$termName}' en '{$taxonomy}': {$errorMsg}{$detail}"
+            );
+        }
+
+        $decoded = json_decode($response, true);
+        if (!is_array($decoded) || !isset($decoded['id'])) {
+            $this->stats['errors']++;
+            throw new RuntimeException(
+                "Respuesta inesperada al asegurar término vía bridge: no se recibió ID"
+            );
+        }
+
+        $this->stats['success']++;
+        return (int) $decoded['id'];
+    }
+
+    /**
+     * Asigna taxonomías a un post existente vía el bridge script de WordPress.
+     *
+     * Evita que LiteSpeed/CGI borre el header Authorization en peticiones
+     * a la REST API. Útil para reparar cómics publicados sin taxonomías
+     * (por bugs anteriores donde los términos no se creaban correctamente).
+     *
+     * @param int   $postId     ID del post en WordPress
+     * @param array $taxonomies Mapa taxonomy_slug => [term_ids]
+     *                          Ej: ['personaje' => [123,456], 'autor' => [789]]
+     * @return array<string, mixed> Respuesta del bridge
+     * @throws RuntimeException Si falla la asignación
+     */
+    public function setPostTermsViaBridge(int $postId, array $taxonomies): array
+    {
+        $this->stats['requests']++;
+
+        $bridgeUrl = rtrim($this->baseUrl, '/') . '/wp-media-bridge.php?action=set_post_terms';
+
+        $payload = [
+            'post_id'    => $postId,
+            'taxonomies' => $taxonomies,
+        ];
+
+        $ch = curl_init($bridgeUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => [
+                $this->authHeader,
+                'Content-Type: application/json',
+                'Cache-Control: no-cache',
+            ],
+            CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+            CURLOPT_TIMEOUT        => $this->timeout,
+            CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_USERAGENT      => 'ComicScraperPro/1.0',
+            CURLOPT_FORBID_REUSE   => true,
+            CURLOPT_FRESH_CONNECT  => true,
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error    = curl_error($ch);
+        curl_close($ch);
+
+        if ($response === false || $httpCode < 200 || $httpCode >= 300) {
+            $this->stats['errors']++;
+            $errorMsg = $error ?: "HTTP {$httpCode}";
+            $detail = '';
+            if ($response) {
+                $decoded = json_decode($response, true);
+                if (is_array($decoded) && isset($decoded['error'])) {
+                    $detail = ' - ' . $decoded['error'];
+                } else {
+                    $detail = ' - ' . substr($response, 0, 300);
+                }
+            }
+            throw new RuntimeException(
+                "Error asignando taxonomías vía bridge al post {$postId}: {$errorMsg}{$detail}"
+            );
+        }
+
+        $decoded = json_decode($response, true);
+        if (!is_array($decoded)) {
+            $this->stats['errors']++;
+            throw new RuntimeException(
+                "Respuesta no JSON al asignar taxonomías al post {$postId}"
+            );
+        }
+
+        $this->stats['success']++;
         return $decoded;
     }
 
