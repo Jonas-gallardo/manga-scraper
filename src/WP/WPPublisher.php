@@ -24,6 +24,8 @@
  * @subpackage WP
  */
 
+require_once __DIR__ . '/../AI/DeepSeekClient.php';
+
 class WPPublisher
 {
     /** @var WPClient Cliente HTTP para WordPress REST API */
@@ -31,6 +33,9 @@ class WPPublisher
 
     /** @var WPTaxonomySync Sincronizador de taxonomías */
     private WPTaxonomySync $taxonomySync;
+
+    /** @var DeepSeekClient|null Generador de síntesis técnica (post_excerpt) */
+    private ?DeepSeekClient $deepseek;
 
     /** @var PDO Conexión a la BD local */
     private PDO $pdo;
@@ -59,6 +64,10 @@ class WPPublisher
         $this->client = $client;
         $this->taxonomySync = $taxonomySync;
         $this->pdo = $pdo;
+        // Generación de síntesis técnica por IA (Fase 2). Habilitada por defecto.
+        $this->deepseek = (!isset($options['enable_ai_excerpt']) || $options['enable_ai_excerpt'])
+            ? new DeepSeekClient()
+            : null;
         $this->skipImageUpload = (bool) ($options['skip_image_upload'] ?? false);
         $this->stats = [
             'total_comics'     => 0,
@@ -264,7 +273,7 @@ class WPPublisher
                 if ($pageProgressCallback !== null) {
                     $pageProgressCallback($pageNum, $totalPages, $titulo);
                 }
-            });
+            }, $taxData);
             $mediaIds    = $uploadResult['media_ids'] ?? [];
             $failedPages = $uploadResult['failed_pages'] ?? [];
 
@@ -315,7 +324,17 @@ class WPPublisher
             throw $lastException;
         };
 
-        // ── 6. Sincronizar taxonomías (con reintento por rate-limiting) ──
+        // ── 6. Generar síntesis técnica por IA (Fase 2) ──
+        // No bloqueante: si DeepSeek falla, se publica sin excerpt.
+        $excerpt = '';
+        if ($this->deepseek !== null) {
+            $excerpt = $this->generateAiExcerpt($titulo, $taxData);
+            if ($excerpt !== '') {
+                $this->addProgressLog("🤖 Síntesis IA generada (" . mb_strlen($excerpt) . " chars)", 'info');
+            }
+        }
+
+        // ── 7. Sincronizar taxonomías (con reintento por rate-limiting) ──
         $this->addProgressLog("🏷️ PASO C: Sincronizando taxonomías...", 'info');
         $taxonomySyncStart = microtime(true);
 
@@ -337,17 +356,17 @@ class WPPublisher
         $taxPayload = $this->taxonomySync->buildTaxonomyPayload($syncedIds);
         $this->addProgressLog("   → Taxonomías sincronizadas en " . round(microtime(true) - $taxonomySyncStart, 2) . "s", 'info');
 
-        // ── 7. Determinar portada (primera página del cómic) ──
+        // ── 8. Determinar portada (primera página del cómic) ──
         $featuredMediaId = !empty($mediaIds) ? (int) end($mediaIds) : 0;
         if ($featuredMediaId > 0) {
             $this->addProgressLog("   → Portada: attachment ID {$featuredMediaId}", 'info');
         }
 
-        // ── 8. Construir payload del post ──
-        $payload = $this->buildPostPayload($titulo, $imageComicString, $taxPayload, $featuredMediaId);
+        // ── 9. Construir payload del post ──
+        $payload = $this->buildPostPayload($titulo, $imageComicString, $taxPayload, $featuredMediaId, $excerpt);
         $this->addProgressLog("📝 Publicando post en WordPress...", 'info');
 
-        // ── 9. Publicar (con reintento por rate-limiting) ──
+        // ── 10. Publicar (con reintento por rate-limiting) ──
         // En entornos LiteSpeed/CGI, /wp-json/wp/v2/posts pierde el
         // header Authorization. Si el bridge está activo, lo usamos también
         // para crear el post y evitar HTTP 401.
@@ -362,7 +381,7 @@ class WPPublisher
             $wpPostId = (int) ($response['id'] ?? 0);
 
             if ($wpPostId > 0) {
-                // ── 10. Actualizar meta del campo image_comic (con reintento) ──
+                // ── 11. Actualizar meta del campo image_comic (con reintento) ──
                 if ($imageComicString !== '') {
                     try {
                         $retryWithBackoff('Actualización de meta image_comic', function() use ($wpPostId, $imageComicString): void {
@@ -732,7 +751,7 @@ class WPPublisher
      * encarga de espaciar cada petición HTTPS. Aquí solo añadimos una pausa
      * extra entre imágenes y reintento simple en caso de error de conexión.
      */
-    private function uploadComicImages(int $comicId, string $titulo, string $rutaCarpeta, ?callable $pageProgressCallback = null): array
+    private function uploadComicImages(int $comicId, string $titulo, string $rutaCarpeta, ?callable $pageProgressCallback = null, array $taxData = []): array
     {
         $mediaIds = [];
         $failedPages = [];
@@ -752,6 +771,28 @@ class WPPublisher
         $images = array_reverse($images);
         $titleSlug = $this->sanitizeTitleSlug($titulo);
 
+        // ── Generar alt base descriptivo por IA (UNA llamada DeepSeek por cómic) ──
+        // Formato verificado (idéntico al backfill): página 1 = descripción completa,
+        // páginas N = "base - Página N". No bloqueante: si DeepSeek falla, se usa
+        // el formato legado "Título - Página N".
+        $baseAlt = '';
+        if ($this->deepseek !== null) {
+            try {
+                $baseAlt = (string) $this->deepseek->generateAltText(
+                    $titulo,
+                    implode(', ', $taxData['universos'] ?? []),
+                    implode(', ', $taxData['personajes'] ?? []),
+                    implode(', ', $taxData['tipos'] ?? []),
+                    implode(', ', $taxData['etiquetas'] ?? [])
+                );
+            } catch (Throwable $e) {
+                $baseAlt = '';
+            }
+            if ($baseAlt !== '') {
+                $this->addProgressLog("🤖 Alt base descriptivo generado (" . mb_strlen($baseAlt) . " chars)", 'info');
+            }
+        }
+
         // ── Tracker de fallos SSL consecutivos para backoff exponencial ──
         $consecutiveSslFailures = 0;
         $maxConsecutiveSsl = defined('PUBLISH_MAX_CONSECUTIVE_SSL_FAILURES') ? (int) PUBLISH_MAX_CONSECUTIVE_SSL_FAILURES : 3;
@@ -759,7 +800,13 @@ class WPPublisher
         foreach ($images as $index => $imagePath) {
             $pageNum = $index + 1;
             $fileName = "{$comicId}-{$titleSlug}-pagina-{$pageNum}.webp";
-            $altText = "{$titulo} - Página {$pageNum}";
+            // Alt descriptivo IA: página 1 = base completa, páginas N = base - Página N.
+            // Fallback al formato legado si no se pudo generar la base.
+            if ($baseAlt !== '') {
+                $altText = ($pageNum === 1) ? $baseAlt : $baseAlt . ' - Página ' . $pageNum;
+            } else {
+                $altText = "{$titulo} - Página {$pageNum}";
+            }
 
             if ($pageProgressCallback !== null) {
                 $pageProgressCallback($pageNum, $totalImages);
@@ -893,14 +940,53 @@ class WPPublisher
     }
 
     /**
+     * Genera la síntesis técnica (post_excerpt) con DeepSeek.
+     *
+     * Mapea las claves plurales de `taxonomias_parsed` (universos, tipos,
+     * autores, personajes, etiquetas) a los campos del prompt verificado.
+     * No bloqueante: devuelve '' si DeepSeek falla o si no hay datos útiles.
+     *
+     * @param string $titulo Título del cómic
+     * @param array<string, mixed> $taxData Taxonomías parseadas (claves plurales)
+     * @return string Síntesis generada o '' si falló
+     */
+    private function generateAiExcerpt(string $titulo, array $taxData): string
+    {
+        if ($this->deepseek === null) {
+            return '';
+        }
+
+        try {
+            $universo   = implode(', ', $taxData['universos'] ?? []);
+            $personajes = implode(', ', $taxData['personajes'] ?? []);
+            $tipo       = implode(', ', $taxData['tipos'] ?? []);
+            $etiquetas  = implode(', ', $taxData['etiquetas'] ?? []);
+
+            $excerpt = $this->deepseek->generateExcerpt($titulo, $universo, $personajes, $tipo, $etiquetas);
+
+            if ($excerpt === null || trim($excerpt) === '') {
+                $this->addProgressLog("⚠️ DeepSeek no generó excerpt: " . $this->deepseek->getLastError(), 'warning');
+                return '';
+            }
+
+            return $excerpt;
+        } catch (Throwable $e) {
+            $this->addProgressLog("⚠️ Error generando síntesis IA: " . $e->getMessage(), 'warning');
+            return '';
+        }
+    }
+
+    /**
      * Construye el payload completo para el POST a /wp/v2/posts.
      *
      * @param string $titulo
      * @param string $imageComicString IDs separados por coma para acf.photo_gallery.image_comic
      * @param array<string, mixed> $taxPayload IDs de taxonomías
+     * @param int $featuredMediaId ID de la imagen destacada
+     * @param string $excerpt Síntesis técnica (post_excerpt)
      * @return array<string, mixed>
      */
-    private function buildPostPayload(string $titulo, string $imageComicString, array $taxPayload, int $featuredMediaId = 0): array
+    private function buildPostPayload(string $titulo, string $imageComicString, array $taxPayload, int $featuredMediaId = 0, string $excerpt = ''): array
     {
         // Sanitizar título para HTTP: elimina caracteres que disparan
         // WAFs como cPGuard / Imunify360 (zero-width, bidi, control chars)
@@ -914,6 +1000,11 @@ class WPPublisher
             'status' => 'publish',
             'acf'    => [],
         ];
+
+        // ── Síntesis técnica por IA → post_excerpt (Fase 2) ──
+        if ($excerpt !== '') {
+            $payload['excerpt'] = $this->sanitizeForHttp($excerpt);
+        }
 
         // ── Portada / Featured Image (primera imagen del cómic) ──
         if ($featuredMediaId > 0) {

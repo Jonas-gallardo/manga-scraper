@@ -229,6 +229,11 @@ if ($action === 'create_post') {
         $postArr['post_content'] = $postData['content'];
     }
 
+    // Excerpt opcional (síntesis técnica generada por IA → post_excerpt)
+    if (!empty($postData['excerpt'])) {
+        $postArr['post_excerpt'] = wp_strip_all_tags($postData['excerpt']);
+    }
+
     // Featured image
     if (!empty($postData['featured_media'])) {
         $postArr['meta_input']['_thumbnail_id'] = (int) $postData['featured_media'];
@@ -398,6 +403,246 @@ if ($action === 'set_post_terms') {
     exit;
 }
 
+// ── Acción list_posts: listar posts publicados con sus taxonomías ──
+// Usada por la Fase 1 (compensación) para consultar los posts DESDE el sitio
+// (no la BD local), obtener su ID real y los nombres de términos de cada taxonomía.
+// Recibe (JSON opcional): { "post_type": "post", "per_page": 20, "page": 1, "offset": 0 }
+// Responde: { "success": true, "count": N, "posts": [ { "id", "title", "excerpt", "taxonomies": {...} } ] }
+if ($action === 'list_posts') {
+    $raw = file_get_contents('php://input');
+    $input = json_decode($raw, true);
+    if (!is_array($input)) {
+        $input = [];
+    }
+
+    $postType = sanitize_text_field($input['post_type'] ?? 'post');
+    $perPage  = max(1, min(100, (int) ($input['per_page'] ?? 20)));
+    $offset   = max(0, (int) ($input['offset'] ?? 0));
+
+    if (!user_can($fullUser, 'edit_posts')) {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Forbidden', 'reason' => 'requires edit_posts capability']));
+    }
+
+    if (!post_type_exists($postType)) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => "Post type '{$postType}' does not exist"]));
+    }
+
+    $taxonomies = ['post_tag', 'universo', 'personaje', 'idioma', 'tipo', 'autor'];
+
+    $queryArgs = [
+        'post_type'      => $postType,
+        'post_status'    => 'publish',
+        'posts_per_page' => $perPage,
+        'offset'         => $offset,
+        'orderby'        => 'ID',
+        'order'          => 'ASC',
+        'no_found_rows'  => true,
+    ];
+
+    $posts = get_posts($queryArgs);
+
+    $items = [];
+    foreach ($posts as $p) {
+        $item = [
+            'id'      => (int) $p->ID,
+            'title'   => $p->post_title,
+            'excerpt' => (string) ($p->post_excerpt ?? ''),
+            'taxonomies' => [],
+        ];
+
+        foreach ($taxonomies as $tax) {
+            if (!taxonomy_exists($tax)) {
+                continue;
+            }
+            $terms = wp_get_post_terms($p->ID, $tax, ['fields' => 'names']);
+            if (is_wp_error($terms)) {
+                $terms = [];
+            }
+            $terms = array_values(array_map('strval', $terms));
+            if (!empty($terms)) {
+                $item['taxonomies'][$tax] = $terms;
+            }
+        }
+
+        $items[] = $item;
+    }
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success'   => true,
+        'post_type' => $postType,
+        'count'     => count($items),
+        'posts'     => $items,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── Acción update_post_excerpt: escribir post_excerpt de un post existente ──
+// Recibe: { "post_id": 123, "excerpt": "Texto generado por IA" }
+// Responde: { "success": true, "post_id": 123 }
+if ($action === 'update_post_excerpt') {
+    $raw = file_get_contents('php://input');
+    $input = json_decode($raw, true);
+
+    if (!is_array($input) || empty($input['post_id']) || !isset($input['excerpt'])) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Missing required fields: post_id, excerpt']));
+    }
+
+    $postId  = (int) $input['post_id'];
+    $excerpt = trim((string) $input['excerpt']);
+
+    if (!user_can($fullUser, 'edit_posts')) {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Forbidden', 'reason' => 'requires edit_posts capability']));
+    }
+
+    $post = get_post($postId);
+    if (!$post) {
+        http_response_code(404);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => "Post ID {$postId} not found"]));
+    }
+
+    $result = wp_update_post([
+        'ID'           => $postId,
+        'post_excerpt' => wp_strip_all_tags($excerpt),
+    ], true);
+
+    if (is_wp_error($result)) {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => $result->get_error_message()]));
+    }
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success' => true,
+        'post_id' => $postId,
+        'excerpt' => $excerpt,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── Acción list_comics: listar cómics con sus IDs de imagen (image_comic) ──
+// Usada por el backfill de alt text para saber qué attachments pertenecen a
+// cada cómic y qué alt text tienen actualmente.
+// Recibe (JSON opcional): { "per_page": 100, "offset": 0 }
+// Responde: { "success": true, "count": N, "comics": [ { "id", "title", "attachments": [ { "id", "alt" } ] } ] }
+if ($action === 'list_comics') {
+    $raw = file_get_contents('php://input');
+    $input = json_decode($raw, true);
+    if (!is_array($input)) {
+        $input = [];
+    }
+
+    $perPage = max(1, min(100, (int) ($input['per_page'] ?? 100)));
+    $offset  = max(0, (int) ($input['offset'] ?? 0));
+
+    if (!user_can($fullUser, 'edit_posts')) {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Forbidden', 'reason' => 'requires edit_posts capability']));
+    }
+
+    $posts = get_posts([
+        'post_type'      => 'post',
+        'post_status'    => 'publish',
+        'posts_per_page' => $perPage,
+        'offset'         => $offset,
+        'orderby'        => 'ID',
+        'order'          => 'ASC',
+        'no_found_rows'  => true,
+    ]);
+
+    $items = [];
+    foreach ($posts as $p) {
+        $imageComic = get_post_meta($p->ID, 'image_comic', true);
+        $attachmentIds = [];
+        if (is_string($imageComic) && $imageComic !== '') {
+            $parts = explode(',', $imageComic);
+            foreach ($parts as $part) {
+                $part = trim($part);
+                if ($part !== '' && ctype_digit($part)) {
+                    $attachmentIds[] = (int) $part;
+                }
+            }
+        }
+
+        $attachments = [];
+        foreach ($attachmentIds as $aid) {
+            $att = get_post($aid);
+            if (!$att || $att->post_type !== 'attachment') {
+                continue;
+            }
+            $attachments[] = [
+                'id'  => $aid,
+                'alt' => (string) get_post_meta($aid, '_wp_attachment_image_alt', true),
+            ];
+        }
+
+        $items[] = [
+            'id'          => (int) $p->ID,
+            'title'       => $p->post_title,
+            'attachments' => $attachments,
+        ];
+    }
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success' => true,
+        'count'   => count($items),
+        'comics'  => $items,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── Acción set_attachment_alt: escribir _wp_attachment_image_alt ──
+// Recibe: { "attachment_id": 123, "alt_text": "Descripción de la imagen" }
+// Responde: { "success": true, "attachment_id": 123 }
+if ($action === 'set_attachment_alt') {
+    $raw = file_get_contents('php://input');
+    $input = json_decode($raw, true);
+
+    if (!is_array($input) || empty($input['attachment_id']) || !isset($input['alt_text'])) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Missing required fields: attachment_id, alt_text']));
+    }
+
+    $attachmentId = (int) $input['attachment_id'];
+    $altText      = sanitize_text_field(trim((string) $input['alt_text']));
+
+    if (!user_can($fullUser, 'upload_files')) {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Forbidden', 'reason' => 'requires upload_files capability']));
+    }
+
+    $att = get_post($attachmentId);
+    if (!$att || $att->post_type !== 'attachment') {
+        http_response_code(404);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => "Attachment ID {$attachmentId} not found"]));
+    }
+
+    update_post_meta($attachmentId, '_wp_attachment_image_alt', $altText);
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success'       => true,
+        'attachment_id' => $attachmentId,
+        'alt_text'      => $altText,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 // ── 5. Leer JSON del cuerpo (subida de imágenes) ──
 $raw = file_get_contents('php://input');
 $input = json_decode($raw, true);
@@ -441,6 +686,12 @@ $fileArray = [
 
 // ── 8. Crear attachment ──
 $attachmentId = media_handle_sideload($fileArray, 0, $altText);
+
+// El 3er parámetro de media_handle_sideload es la DESCRIPTION (post_content),
+// NO el alt text. El alt real vive en el meta _wp_attachment_image_alt.
+if (!is_wp_error($attachmentId) && $altText !== '') {
+    update_post_meta($attachmentId, '_wp_attachment_image_alt', sanitize_text_field($altText));
+}
 
 // ── 9. Limpiar archivo temporal ──
 if (file_exists($tmpFile)) {
