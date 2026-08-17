@@ -451,8 +451,19 @@ if ($action === 'list_posts') {
             'id'      => (int) $p->ID,
             'title'   => $p->post_title,
             'excerpt' => (string) ($p->post_excerpt ?? ''),
+            'content' => (string) ($p->post_content ?? ''),
+            'page_count' => 0,
             'taxonomies' => [],
         ];
+
+        // Número de páginas del cómic (campo ACF image_comic: IDs separados por coma)
+        $imageComic = get_post_meta($p->ID, 'image_comic', true);
+        if (is_string($imageComic) && $imageComic !== '') {
+            $parts = array_filter(array_map('trim', explode(',', $imageComic)), static function (string $v): bool {
+                return $v !== '' && ctype_digit($v);
+            });
+            $item['page_count'] = count($parts);
+        }
 
         foreach ($taxonomies as $tax) {
             if (!taxonomy_exists($tax)) {
@@ -477,6 +488,56 @@ if ($action === 'list_posts') {
         'post_type' => $postType,
         'count'     => count($items),
         'posts'     => $items,
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── Acción update_post_content: escribir post_content de un post existente ──
+// Usada por el backfill de contenido (anti thin-content) para rellenar el
+// cuerpo de los cómics ya publicados.
+// Recibe: { "post_id": 123, "content": "<h2>...</h2><p>...</p>" }
+// Responde: { "success": true, "post_id": 123 }
+if ($action === 'update_post_content') {
+    $raw = file_get_contents('php://input');
+    $input = json_decode($raw, true);
+
+    if (!is_array($input) || empty($input['post_id']) || !isset($input['content'])) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Missing required fields: post_id, content']));
+    }
+
+    $postId  = (int) $input['post_id'];
+    $content = (string) $input['content'];
+
+    if (!user_can($fullUser, 'edit_posts')) {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => 'Forbidden', 'reason' => 'requires edit_posts capability']));
+    }
+
+    $post = get_post($postId);
+    if (!$post) {
+        http_response_code(404);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => "Post ID {$postId} not found"]));
+    }
+
+    $result = wp_update_post([
+        'ID'           => $postId,
+        'post_content' => $content,
+    ], true);
+
+    if (is_wp_error($result)) {
+        http_response_code(500);
+        header('Content-Type: application/json');
+        die(json_encode(['error' => $result->get_error_message()]));
+    }
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success' => true,
+        'post_id' => $postId,
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }

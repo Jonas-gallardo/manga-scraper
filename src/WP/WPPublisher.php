@@ -363,7 +363,7 @@ class WPPublisher
         }
 
         // ── 9. Construir payload del post ──
-        $payload = $this->buildPostPayload($titulo, $imageComicString, $taxPayload, $featuredMediaId, $excerpt);
+        $payload = $this->buildPostPayload($titulo, $imageComicString, $taxPayload, $featuredMediaId, $excerpt, $taxData);
         $this->addProgressLog("📝 Publicando post en WordPress...", 'info');
 
         // ── 10. Publicar (con reintento por rate-limiting) ──
@@ -986,17 +986,26 @@ class WPPublisher
      * @param string $excerpt Síntesis técnica (post_excerpt)
      * @return array<string, mixed>
      */
-    private function buildPostPayload(string $titulo, string $imageComicString, array $taxPayload, int $featuredMediaId = 0, string $excerpt = ''): array
+    private function buildPostPayload(string $titulo, string $imageComicString, array $taxPayload, int $featuredMediaId = 0, string $excerpt = '', array $taxData = []): array
     {
         // Sanitizar título para HTTP: elimina caracteres que disparan
         // WAFs como cPGuard / Imunify360 (zero-width, bidi, control chars)
         $titulo = $this->sanitizeForHttp($titulo);
+
+        // ── Limpiar códigos fuente y paréntesis del título publicado ──
+        // Reutiliza la limpieza ya verificada de DeepSeekClient.
+        // Evita títulos tipo "[wjs07] Título (Serie)" en <title> y en la URL.
+        $tituloLimpio = DeepSeekClient::cleanTitle($titulo);
+        if ($tituloLimpio !== '') {
+            $titulo = $tituloLimpio;
+        }
         if ($titulo === '') {
             $titulo = 'Sin título';
         }
 
         $payload = [
             'title'  => $titulo,
+            'slug'   => $this->sanitizeTitleSlug($titulo), // URL limpia y predecible, sin sufijos -2
             'status' => 'publish',
             'acf'    => [],
         ];
@@ -1005,6 +1014,11 @@ class WPPublisher
         if ($excerpt !== '') {
             $payload['excerpt'] = $this->sanitizeForHttp($excerpt);
         }
+
+        // ── Cuerpo semántico (anti thin-content) ──
+        // Combina la síntesis de IA con una ficha técnica legible y el
+        // recuento de páginas, para que cada post tenga texto indexable.
+        $payload['content'] = $this->buildPostContent($titulo, $imageComicString, $taxData, $excerpt);
 
         // ── Portada / Featured Image (primera imagen del cómic) ──
         if ($featuredMediaId > 0) {
@@ -1042,6 +1056,83 @@ class WPPublisher
         }
 
         return $payload;
+    }
+
+    /**
+     * Construye el cuerpo HTML semántico del post (anti thin-content).
+     *
+     * Combina la síntesis de IA con una ficha técnica legible (universo,
+     * tipo, idioma, personajes, etiquetas) y el recuento de páginas.
+     * Devuelve '' si no hay datos útiles.
+     *
+     * @param string $titulo Título del cómic (ya limpio)
+     * @param string $imageComicString IDs de attachment separados por coma
+     * @param array<string, mixed> $taxData Taxonomías parseadas (claves plurales)
+     * @param string $excerpt Síntesis técnica generada por IA
+     * @return string HTML para post_content
+     */
+    private function buildPostContent(string $titulo, string $imageComicString, array $taxData, string $excerpt): string
+    {
+        $html = '';
+
+        // ── Sinopsis / síntesis ──
+        if ($excerpt !== '') {
+            $html .= '<h2>Sinopsis</h2>' . "\n";
+            $html .= '<p>' . $this->sanitizeForHttp($excerpt) . '</p>' . "\n";
+        }
+
+        // ── Ficha técnica ──
+        $ficha = [];
+        $universos  = array_filter(array_map('trim', (array) ($taxData['universos'] ?? [])));
+        $personajes = array_filter(array_map('trim', (array) ($taxData['personajes'] ?? [])));
+        $tipos      = array_filter(array_map('trim', (array) ($taxData['tipos'] ?? [])));
+        $autores    = array_filter(array_map('trim', (array) ($taxData['autores'] ?? [])));
+        $etiquetas  = array_filter(array_map('trim', (array) ($taxData['etiquetas'] ?? [])));
+        $idiomas    = array_filter(array_map('trim', (array) ($taxData['idiomas'] ?? [])));
+
+        if (!empty($universos))  $ficha['Universo']   = implode(', ', $universos);
+        if (!empty($personajes)) $ficha['Personajes'] = implode(', ', $personajes);
+        if (!empty($autores))    $ficha['Autor']      = implode(', ', $autores);
+        if (!empty($tipos))      $ficha['Tipo']       = implode(', ', $tipos);
+        if (!empty($idiomas))    $ficha['Idioma']     = implode(', ', $idiomas);
+        if (!empty($etiquetas))  $ficha['Etiquetas']  = implode(', ', $etiquetas);
+
+        if (!empty($ficha)) {
+            $html .= '<h2>Ficha técnica</h2>' . "\n<ul>\n";
+            foreach ($ficha as $clave => $valor) {
+                $html .= '<li><strong>' . $this->escHtml($clave) . ':</strong> ' . $this->escHtml($valor) . "</li>\n";
+            }
+            $html .= "</ul>\n";
+        }
+
+        // ── Recuento de páginas ──
+        $numPaginas = 0;
+        if ($imageComicString !== '') {
+            $numPaginas = count(array_filter(array_map('trim', explode(',', $imageComicString))));
+        }
+        if ($numPaginas > 0) {
+            $html .= '<p>' . $this->escHtml(sprintf('Este cómic contiene %d páginas en alta resolución.', $numPaginas)) . "</p>\n";
+        }
+
+        // ── Galería (placeholder semántico; la galería visual la renderiza el shortcode ACF) ──
+        if ($numPaginas > 0) {
+            $html .= '<h2>Galería</h2>' . "\n";
+            $html .= '<p>' . $this->escHtml(sprintf('Explora la galería completa de «%s» a continuación.', $titulo)) . "</p>\n";
+        }
+
+        return trim($html);
+    }
+
+    /**
+     * Escapa un string para insertarlo como texto dentro de HTML.
+     * Equivalente standalone de esc_html() de WordPress (no disponible aquí).
+     *
+     * @param string $text
+     * @return string
+     */
+    private function escHtml(string $text): string
+    {
+        return htmlspecialchars((string) $text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
 
     /**
